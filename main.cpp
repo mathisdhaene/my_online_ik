@@ -3,6 +3,7 @@
 #include <thread>
 #include <chrono>
 #include <cstring>
+#include <cmath>
 
 // POSIX networking
 #include <sys/socket.h>
@@ -17,259 +18,231 @@
 #include "rtosim/MarkersReferenceFromQueue.h"
 #include "rtosim/EndOfData.h"
 
-// OpenSim (v4.3)
+// OpenSim
 #include <OpenSim/OpenSim.h>
+#include <OpenSim/Common/STOFileAdapter.h>
+#include <OpenSim/Common/TimeSeriesTable.h>
 
 // Concurrency
 #include <rtb/concurrency/Latch.h>
 
-// ----------------------
-// Configuration
-// ----------------------
-struct Config {
-    int port = 5555;
-    int numMarkers = 20;
-    double frameRate = 30.0; // Hz
-    std::string modelPath;
+// ==========================================================
+//                 ONE EURO FILTER (JOINTS)
+// ==========================================================
+class OneEuroFilter {
+public:
+    OneEuroFilter(double minCutoff = 4.0, double beta = 0.02, double dCutoff = 1.0)
+        : minCutoff(minCutoff), beta(beta), dCutoff(dCutoff),
+          initialized(false), prevValue(0.0), prevDeriv(0.0), prevTime(0.0) {}
 
-    Config(const std::string& defaultModel)
-        : modelPath(defaultModel) {}
+    double filter(double x, double t) {
+        if (!initialized) {
+            initialized = true;
+            prevValue = x;
+            prevTime = t;
+            return x;
+        }
+
+        double dt = t - prevTime;
+        if (dt <= 0.0) dt = 1.0 / 30.0;
+
+        double dx = (x - prevValue) / dt;
+        double alphaD = computeAlpha(dCutoff, dt);
+        prevDeriv = alphaD * dx + (1.0 - alphaD) * prevDeriv;
+
+        double cutoff = minCutoff + beta * std::fabs(prevDeriv);
+        double alpha = computeAlpha(cutoff, dt);
+
+        double filtered = alpha * x + (1.0 - alpha) * prevValue;
+        prevValue = filtered;
+        prevTime = t;
+        return filtered;
+    }
+
+private:
+    bool initialized;
+    double prevValue, prevDeriv, prevTime;
+    double minCutoff, beta, dCutoff;
+
+    double computeAlpha(double cutoff, double dt) {
+        const double PI = 3.14159265358979323846;
+        double tau = 1.0 / (2.0 * PI * cutoff);
+        return 1.0 / (1.0 + tau / dt);
+    }
 };
 
-// ----------------------
-// Socket receiver
-// ----------------------
-void socketReceiver(
-    rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue,
-    const Config& cfg)
-{
-    const int BYTES_PER_MARKER = 3 * sizeof(float);
-    const int FRAME_SIZE = cfg.numMarkers * BYTES_PER_MARKER;
+// ==========================================================
+//              MARKER FILTER (OUTLIERS + SMOOTH)
+// ==========================================================
+struct MarkerFilter {
+    struct MarkerState {
+        bool initialized = false;
+        SimTK::Vec3 lastRaw;
+        SimTK::Vec3 xHat;
+        double lastTime = 0.0;
+    };
 
-    int server_fd = -1;
-    int client_fd = -1;
-    sockaddr_in address{};
-    socklen_t addrlen = sizeof(address);
+    std::vector<MarkerState> states;
+    double maxJump, maxVelocity, alpha;
 
-    std::cout << "[SocketReceiver] Starting on port " << cfg.port << "…" << std::endl;
+    MarkerFilter(int n, double mj = 0.18, double mv = 6.0, double a = 0.6)
+        : states(n), maxJump(mj), maxVelocity(mv), alpha(a) {}
 
-    server_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        std::perror("[SocketReceiver] socket() failed");
-        markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
-        return;
+    SimTK::Vec3 filterOne(int idx, const SimTK::Vec3& raw, double t) {
+        auto& s = states[idx];
+
+        if (!s.initialized) {
+            s.initialized = true;
+            s.lastRaw = raw;
+            s.xHat = raw;
+            s.lastTime = t;
+            return raw;
+        }
+
+        double dt = t - s.lastTime;
+        if (dt <= 0.0) dt = 1.0 / 30.0;
+
+        double jump = (raw - s.lastRaw).norm();
+        double vel = jump / dt;
+        bool outlier = (jump > maxJump) || (vel > maxVelocity);
+
+        SimTK::Vec3 input = outlier ? s.xHat : raw;
+        s.xHat = alpha * input + (1.0 - alpha) * s.xHat;
+
+        s.lastRaw = raw;
+        s.lastTime = t;
+        return s.xHat;
     }
+};
 
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+// ==========================================================
+//                    SOCKET RECEIVER
+// ==========================================================
+static constexpr int PORT = 5555;
+static constexpr int NUM_MARKERS = 20;
+static constexpr int FRAME_SIZE = NUM_MARKERS * 3 * sizeof(float);
 
+void socketReceiver(rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue) {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(static_cast<uint16_t>(cfg.port));
+    address.sin_port = htons(PORT);
 
-    if (bind(server_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
-        std::perror("[SocketReceiver] bind() failed");
-        close(server_fd);
-        markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
-        return;
-    }
+    bind(server_fd, (sockaddr*)&address, sizeof(address));
+    listen(server_fd, 1);
 
-    if (listen(server_fd, 1) < 0) {
-        std::perror("[SocketReceiver] listen() failed");
-        close(server_fd);
-        markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
-        return;
-    }
+    int client_fd = accept(server_fd, nullptr, nullptr);
 
-    std::cout << "[SocketReceiver] Waiting for client…" << std::endl;
-    client_fd = accept(server_fd, reinterpret_cast<sockaddr*>(&address), &addrlen);
-    if (client_fd < 0) {
-        std::perror("[SocketReceiver] accept() failed");
-        close(server_fd);
-        markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
-        return;
-    }
-    std::cout << "[SocketReceiver] Client connected." << std::endl;
-
-    std::vector<float> buffer(cfg.numMarkers * 3);
+    MarkerFilter filter(NUM_MARKERS);
+    std::vector<float> buffer(NUM_MARKERS * 3);
     int frameCount = 0;
-    const double dt = 1.0 / cfg.frameRate;
 
     while (true) {
-        int bytesRead = ::read(client_fd, buffer.data(), FRAME_SIZE);
-        if (bytesRead == 0) {
-            std::cout << "[SocketReceiver] Client closed connection." << std::endl;
-            break;
-        }
-        if (bytesRead < 0) {
-            std::perror("[SocketReceiver] read() failed");
-            break;
-        }
-        if (bytesRead != FRAME_SIZE) {
-            std::cerr << "[SocketReceiver] Incomplete frame: got "
-                      << bytesRead << " bytes, expected "
-                      << FRAME_SIZE << " — skipping.\n";
-            continue;
-        }
+        int n = read(client_fd, buffer.data(), FRAME_SIZE);
+        if (n <= 0) break;
 
         rtosim::MarkerSetFrame frame;
-        frame.time = frameCount * dt;
-        frameCount++;
+        frame.time = frameCount * (1.0 / 30.0);
+        double t = frame.time;
 
-        frame.data.reserve(cfg.numMarkers);
-        for (int i = 0; i < cfg.numMarkers; ++i) {
-            const float x = buffer[3 * i + 0];
-            const float y = buffer[3 * i + 1];
-            const float z = buffer[3 * i + 2];
-            frame.data.emplace_back(SimTK::Vec3(x, y, z));
+        for (int i = 0; i < NUM_MARKERS; ++i) {
+            SimTK::Vec3 raw(buffer[3*i], buffer[3*i+1], buffer[3*i+2]);
+            frame.data.push_back(filter.filterOne(i, raw, t));
         }
 
         markerQueue.push(frame);
-        std::cout << "[SocketReceiver] Pushed frame #" << frameCount
-                  << " at t = " << frame.time << " s" << std::endl;
+        frameCount++;
     }
 
     markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
-
-    if (client_fd >= 0) close(client_fd);
-    if (server_fd >= 0) close(server_fd);
-
-    std::cout << "[SocketReceiver] Shutdown complete." << std::endl;
+    close(client_fd);
+    close(server_fd);
 }
 
-// ----------------------
-// Main
-// ----------------------
+// ==========================================================
+//                           MAIN
+// ==========================================================
 int main(int argc, char** argv) {
-    // -------- Config from CLI --------
-    std::string defaultModel = "upperlimb-biorob.osim"; // relative by default
-    Config cfg(defaultModel);
-
-    if (argc > 1) {
-        cfg.modelPath = argv[1]; // first argument: model path
+    if (argc < 2) {
+        std::cerr << "Usage: ./online_ik_test <model.osim>\n";
+        return 1;
     }
 
-    std::cout << "[Init] Using model: " << cfg.modelPath << std::endl;
+    std::string modelPath = argv[1];
+    std::cout << "[Init] Using model: " << modelPath << std::endl;
 
-    // -------- Queues & latches --------
     rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame> markerQueue;
     rtosim::IKoutputs<rtosim::GeneralisedCoordinatesFrame> outputQueue;
+    rtb::Concurrency::Latch doneWithSubscriptions(1), doneWithExecution(1);
 
-    rtb::Concurrency::Latch doneWithSubscriptions(1);
-    rtb::Concurrency::Latch doneWithExecution(1);
-
-    // -------- Load model & visualizer --------
+    // -------- STABLE MODEL LOADING (DO NOT TOUCH) --------
     OpenSim::Model model;
-    try {
-        model = OpenSim::Model(cfg.modelPath);
-    } catch (const std::exception& e) {
-        std::cerr << "[Init] Failed to load model: " << e.what() << std::endl;
-        return 1;
-    }
-
+    model = OpenSim::Model(modelPath);
     model.setUseVisualizer(true);
-    SimTK::State state;
-    try {
-        state = model.initSystem();
-    } catch (const std::exception& e) {
-        std::cerr << "[Init] Failed to init system: " << e.what() << std::endl;
-        return 1;
-    }
+    SimTK::State state = model.initSystem();
 
     auto& viz = model.updVisualizer().updSimbodyVisualizer();
     viz.setBackgroundType(SimTK::Visualizer::GroundAndSky);
 
-    std::cout << "[Init] Model and visualizer initialized." << std::endl;
-
-    // -------- Start IK solver + socket thread --------
-    const double accuracy = 1e-4;
-    const double constraintWeight = 10.0;
-
+    // -------- IK SOLVER --------
     rtosim::IKSolverParallel ikSolver(
-        markerQueue,
-        outputQueue,
-        doneWithSubscriptions,
-        doneWithExecution,
-        cfg.modelPath,
-        accuracy,
-        constraintWeight);
+        markerQueue, outputQueue,
+        doneWithSubscriptions, doneWithExecution,
+        modelPath, 1e-4, 10.0
+    );
+
+    // ---- Custom IK marker weights ----
+    OpenSim::IKTaskSet ikTasks;
+    auto addTask = [&](const std::string& n, double w) {
+        auto* t = new OpenSim::IKMarkerTask();
+        t->setName(n); t->setApply(true); t->setWeight(w);
+        ikTasks.adoptAndAppend(t);
+    };
+
+    addTask("ACD",1.0); addTask("CLAD",1.0); addTask("CLAG",1.0);
+    addTask("MAN",0.8); addTask("XYP",0.8); addTask("T8",0.8); addTask("C7",0.8);
+    addTask("MTACM",0.2); addTask("MTACB",0.2); addTask("MTACL",0.2);
+    addTask("MTHA",0.3); addTask("MTHP",0.25); addTask("MTBA",0.25); addTask("MTBP",0.25);
+    addTask("EL",0.0); addTask("EM",0.5);
+    addTask("PSU",0.8); addTask("PSR",0.8);
+    addTask("MC5",0.9); addTask("MC2",0.9);
+
+    ikSolver.setInverseKinematicsTaskSet(ikTasks);
 
     std::thread ikThread(std::ref(ikSolver));
-    std::thread socketThread(socketReceiver, std::ref(markerQueue), std::cref(cfg));
+    std::thread socketThread(socketReceiver, std::ref(markerQueue));
 
-    // -------- Consume IK results --------
-    int frameCount = 0;
-    std::vector<std::pair<double, std::vector<double>>> allResults;
+    // -------- MAIN LOOP --------
+    std::vector<OneEuroFilter> jointFilters;
+    bool filtersInit = false;
 
     while (true) {
-        auto result = outputQueue.pop();
-        if (rtosim::EndOfData::isEod(result)) {
-            std::cout << "[Main] Received EndOfData from IK solver." << std::endl;
-            break;
+        auto res = outputQueue.pop();
+        if (rtosim::EndOfData::isEod(res)) break;
+
+        auto q = res.data.getQ();
+        if (!filtersInit) {
+            jointFilters.resize(q.size());
+            filtersInit = true;
         }
 
-        auto start = std::chrono::high_resolution_clock::now();
+        for (size_t i = 0; i < q.size(); ++i)
+            q[i] = jointFilters[i].filter(q[i], res.time);
 
-        auto qVals = result.data.getQ();
-        auto& coordSet = model.updCoordinateSet();
-
-        const int nCoords = std::min<int>(coordSet.getSize(), qVals.size());
-        for (int i = 0; i < nCoords; ++i) {
-            coordSet[i].setValue(state, qVals[i]);
-        }
+        auto& coords = model.updCoordinateSet();
+        for (int i = 0; i < coords.getSize(); ++i)
+            coords[i].setValue(state, q[i]);
 
         model.realizePosition(state);
         viz.report(state);
-
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration_us =
-            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-        double duration_ms = duration_us / 1000.0;
-
-        std::cout << "[IK Timing] Frame " << frameCount
-                  << " took " << duration_ms << " ms ("
-                  << duration_us << " µs)." << std::endl;
-
-        allResults.emplace_back(result.time, qVals);
-        frameCount++;
     }
 
-    // -------- Join threads --------
-    if (socketThread.joinable()) socketThread.join();
-    if (ikThread.joinable()) ikThread.join();
+    socketThread.join();
+    ikThread.join();
 
-    // -------- Save results to .mot --------
-    if (!allResults.empty()) {
-        OpenSim::TimeSeriesTable qTable;
-        OpenSim::Array<std::string> coordNames;
-        model.getCoordinateSet().getNames(coordNames);
-
-        std::vector<std::string> stdCoordNames;
-        stdCoordNames.reserve(coordNames.getSize());
-        for (int i = 0; i < coordNames.getSize(); ++i) {
-            stdCoordNames.emplace_back(coordNames[i]);
-        }
-        qTable.setColumnLabels(stdCoordNames);
-
-        double lastTime = -1.0;
-        for (const auto& [time, qVals] : allResults) {
-            if (time <= lastTime) continue;
-            lastTime = time;
-
-            SimTK::RowVector row(static_cast<int>(qVals.size()));
-            for (int i = 0; i < static_cast<int>(qVals.size()); ++i) {
-                row[i] = qVals[i];
-            }
-            qTable.appendRow(time, row);
-        }
-
-        const std::string outName = "output_results.mot";
-        OpenSim::STOFileAdapter::write(qTable, outName);
-        std::cout << "[Main] Saved " << outName
-                  << " with " << allResults.size() << " raw frames." << std::endl;
-    } else {
-        std::cout << "[Main] No frames to save." << std::endl;
-    }
-
+    std::cout << "Press ENTER to close visualizer..." << std::endl;
+    std::cin.get();
     return 0;
 }
+
