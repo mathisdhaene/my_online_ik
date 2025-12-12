@@ -1,0 +1,46 @@
+# Build artifacts
+/build/
+**/build/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+**/*.o
+**/*.a
+**/*.so
+**/*.dylib
+**/*.dll
+**/*.exe
+
+# Installed RTOSIM or fake Filter
+**/install/
+**/fake-filter/
+**/concurrency-install/
+**/filter-install/
+
+# IDEs / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*.user
+*.workspace
+*.project
+*.kdev4
+
+# Logs / temp
+*.log
+*.tmp
+*.bak
+*~
+core
+*.stackdump
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Python virtual envs or notebooks (optional)
+venv*/
+__pycache__/
+*.ipynb_checkpoints/

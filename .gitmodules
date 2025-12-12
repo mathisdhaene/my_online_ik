@@ -1,0 +1,3 @@
+[submodule "RTOSIM"]
+	path = RTOSIM
+	url = https://github.com/mathisdhaene/rtosim.git
