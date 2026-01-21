@@ -5,6 +5,8 @@
 #include <cstring>
 #include <cmath>
 
+#include <csignal>
+
 // POSIX networking
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -163,29 +165,83 @@ void socketReceiver(rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue)
 // ==========================================================
 //                           MAIN
 // ==========================================================
+#include <csignal>   // +++
+#include <string>    // +++ (au cas où)
+
+// ...
+
 int main(int argc, char** argv) {
+    // Avoid SIGPIPE killing the process (Simbody still throws, but we handle it)
+    std::signal(SIGPIPE, SIG_IGN);
+
     if (argc < 2) {
-        std::cerr << "Usage: ./online_ik_test <model.osim>\n";
+        std::cerr << "Usage: ./online_ik_test [--no-viz] <model.osim>\n";
         return 1;
     }
 
-    std::string modelPath = argv[1];
+    // -------- Parse args --------
+    bool useViz = true;
+    std::string modelPath;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--no-viz") {
+            useViz = false;
+        } else if (!a.empty() && a[0] == '-') {
+            std::cerr << "[warn] Unknown flag: " << a << "\n";
+        } else {
+            modelPath = a;
+        }
+    }
+
+    if (modelPath.empty()) {
+        std::cerr << "Usage: ./online_ik_test [--no-viz] <model.osim>\n";
+        return 1;
+    }
+
     std::cout << "[Init] Using model: " << modelPath << std::endl;
 
     rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame> markerQueue;
     rtosim::IKoutputs<rtosim::GeneralisedCoordinatesFrame> outputQueue;
     rtb::Concurrency::Latch doneWithSubscriptions(1), doneWithExecution(1);
 
-    // -------- STABLE MODEL LOADING (DO NOT TOUCH) --------
-    OpenSim::Model model;
-    model = OpenSim::Model(modelPath);
-    model.setUseVisualizer(true);
+    // -------- Load model (single-thread) --------
+    OpenSim::Model model(modelPath);
+    model.setUseVisualizer(useViz);
     SimTK::State state = model.initSystem();
 
-    auto& viz = model.updVisualizer().updSimbodyVisualizer();
-    viz.setBackgroundType(SimTK::Visualizer::GroundAndSky);
+    // We keep a pointer so we can compile even when --no-viz is used
+    SimTK::Visualizer* simbodyViz = nullptr;
 
-    // -------- IK SOLVER --------
+    if (useViz) {
+        auto& viz = model.updVisualizer().updSimbodyVisualizer();
+        viz.setBackgroundType(SimTK::Visualizer::GroundAndSky);
+        simbodyViz = &viz;
+
+        // ------------------------------------------------------------------
+        // CRITICAL: warm-up report BEFORE creating any threads.
+        // This forces the visualizer process to spawn while we're single-threaded.
+        // ------------------------------------------------------------------
+        try {
+            model.realizePosition(state);
+            simbodyViz->report(state);
+            std::cout << "[viz] warm-up report ok\n";
+        } catch (const SimTK::Exception::Base& e) {
+            std::cerr << "[viz] warm-up failed, disabling viz: " << e.what() << "\n";
+            useViz = false;
+            simbodyViz = nullptr;
+        } catch (const std::exception& e) {
+            std::cerr << "[viz] warm-up failed, disabling viz: " << e.what() << "\n";
+            useViz = false;
+            simbodyViz = nullptr;
+        } catch (...) {
+            std::cerr << "[viz] warm-up failed (unknown), disabling viz\n";
+            useViz = false;
+            simbodyViz = nullptr;
+        }
+    }
+
+    // -------- IK SOLVER (creates its own model internally from modelPath) --------
     rtosim::IKSolverParallel ikSolver(
         markerQueue, outputQueue,
         doneWithSubscriptions, doneWithExecution,
@@ -210,39 +266,78 @@ int main(int argc, char** argv) {
 
     ikSolver.setInverseKinematicsTaskSet(ikTasks);
 
+    // -------- Start threads AFTER viz warm-up --------
     std::thread ikThread(std::ref(ikSolver));
     std::thread socketThread(socketReceiver, std::ref(markerQueue));
 
     // -------- MAIN LOOP --------
     std::vector<OneEuroFilter> jointFilters;
     bool filtersInit = false;
+    bool viz_ok = (simbodyViz != nullptr);
 
     while (true) {
         auto res = outputQueue.pop();
         if (rtosim::EndOfData::isEod(res)) break;
 
         auto q = res.data.getQ();
+
+        // Init filters once we know q size
         if (!filtersInit) {
             jointFilters.resize(q.size());
             filtersInit = true;
         }
 
+        // Filter joints
         for (size_t i = 0; i < q.size(); ++i)
             q[i] = jointFilters[i].filter(q[i], res.time);
 
+        // Safety: skip non-finite q (prevents visualizer/realize issues)
+        bool bad = false;
+        for (double v : q) {
+            if (!std::isfinite(v)) { bad = true; break; }
+        }
+        if (bad) {
+            std::cerr << "[warn] Non-finite q at t=" << res.time << " (skipping frame)\n";
+            continue;
+        }
+
         auto& coords = model.updCoordinateSet();
+        if ((int)q.size() != coords.getSize()) {
+            std::cerr << "[warn] q.size()=" << q.size()
+                      << " != coords=" << coords.getSize() << " (skipping frame)\n";
+            continue;
+        }
+
         for (int i = 0; i < coords.getSize(); ++i)
             coords[i].setValue(state, q[i]);
 
         model.realizePosition(state);
-        viz.report(state);
+
+        // Robust viz reporting
+        if (viz_ok) {
+            try {
+                simbodyViz->report(state);
+            } catch (const SimTK::Exception::Base& e) {
+                std::cerr << "[viz] report failed, disabling viz: " << e.what() << "\n";
+                viz_ok = false;
+            } catch (const std::exception& e) {
+                std::cerr << "[viz] report failed, disabling viz: " << e.what() << "\n";
+                viz_ok = false;
+            } catch (...) {
+                std::cerr << "[viz] report failed (unknown), disabling viz\n";
+                viz_ok = false;
+            }
+        }
     }
 
     socketThread.join();
     ikThread.join();
 
-    std::cout << "Press ENTER to close visualizer..." << std::endl;
-    std::cin.get();
+    if (useViz) {
+        std::cout << "Press ENTER to close visualizer..." << std::endl;
+        std::cin.get();
+    }
+
     return 0;
 }
 

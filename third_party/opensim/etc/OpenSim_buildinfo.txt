@@ -1,0 +1,3 @@
+Product Version=4.4
+Compiler=Unix Makefiles-GNU
+Platform=Linux-x64
