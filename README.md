@@ -1,171 +1,214 @@
-# 🦾 my_online_ik — Real-Time OpenSim Pipeline
+# 🔧 Build & Installation
 
-This repository contains the **real-time inverse kinematics pipeline** based on OpenSim and RTOSIM, customized by **Mathis D’Haene** for upper-limb motion tracking and biomechanical analysis.
+This project depends on **OpenSim 4.3**, **Simbody**, and **RTOSIM**.
+Because OpenSim does **not** ship reliable system packages, it must be built from source.
 
----
-
-## 📋 1. System Requirements
-
-Tested on **Ubuntu 24.04 LTS** with:
-
-- GCC 11 / G++ 11  
-- CMake ≥ 3.20  
-- Eigen 3  
-- Boost ≥ 1.65  
-- LAPACK / BLAS  
-- OpenSceneGraph  
-- Qt5 OpenGL
-
-Install all dependencies:
-
-```bash
-sudo apt update
-sudo apt install -y cmake build-essential git \
-  libboost-all-dev libeigen3-dev libtbb-dev \
-  liblapack-dev libblas-dev libxml2-dev \
-  libopenscenegraph-dev libqt5opengl5-dev
-````
+The steps below were tested on **Ubuntu 22.04 / 24.04**.
 
 ---
 
-## ⚙️ 2. Build Simbody 3.7 (required for OpenSim 4.3)
+## 0. System Requirements
 
-RTOSIM and OpenSim 4.3 require **Simbody 3.7**.
-Later releases (≥ 3.8 / 3.9) are incompatible with OpenSim 4.3, so make sure to check out the correct tag.
+* Ubuntu 22.04 or newer
+* GCC ≥ 11
+* CMake ≥ 3.22
+* Python ≥ 3.8 (for OpenSim Python bindings, optional)
+
+---
+
+## 1. Install System Dependencies
 
 ```bash
-# Clone and enter Simbody
-git clone https://github.com/simbody/simbody.git ~/simbody
-cd ~/simbody
+sudo apt-get update
+sudo apt-get install --yes \
+  build-essential \
+  libtool autoconf pkg-config gfortran \
+  libopenblas-dev liblapack-dev \
+  freeglut3-dev libxi-dev libxmu-dev \
+  doxygen \
+  python3 python3-dev python3-numpy python3-setuptools
+```
 
-# Checkout the version used by OpenSim 4.3
-git checkout Simbody-3.7
+---
 
-# Create and enter build directory
-mkdir build && cd build
+## 2. Build and Install SWIG (required by OpenSim)
 
-# Configure and compile
-CC=gcc-11 CXX=g++-11 cmake .. \
+OpenSim requires a **recent SWIG**, newer than what Ubuntu provides.
+
+```bash
+mkdir -p ~/swig-source
+cd ~/swig-source
+
+wget https://github.com/swig/swig/archive/refs/tags/v4.1.1.tar.gz
+tar xzf v4.1.1.tar.gz
+cd swig-4.1.1
+
+sh autogen.sh
+./configure --prefix="$HOME/swig" --disable-ccache
+make -j$(nproc)
+make install
+```
+
+---
+
+## 3. Download OpenSim 4.3 Source Code
+
+```bash
+cd ~
+git clone https://github.com/opensim-org/opensim-core.git
+cd opensim-core
+git checkout 4.3
+```
+
+---
+
+## 4. Build OpenSim Dependencies (Superbuild)
+
+This builds **Simbody**, **ezc3d**, and other required libraries.
+
+```bash
+mkdir -p ~/build_opensim_deps
+cd ~/build_opensim_deps
+
+cmake ../opensim-core/dependencies \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=$HOME/simbody-install
+  -DCMAKE_INSTALL_PREFIX="$HOME/opensim_dependencies_install" \
+  -DSUPERBUILD_ezc3d=ON \
+  -DOPENSIM_WITH_CASADI=ON
+
+make -j$(nproc)
+```
+
+---
+
+## 5. Build and Install OpenSim
+
+```bash
+mkdir -p ~/build_opensim
+cd ~/build_opensim
+
+cmake ../opensim-core \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$HOME/opensim-core-install" \
+  -DOPENSIM_DEPENDENCIES_DIR="$HOME/opensim_dependencies_install" \
+  -DOPENSIM_C3D_PARSER=ezc3d \
+  -DBUILD_PYTHON_WRAPPING=ON \
+  -DBUILD_JAVA_WRAPPING=OFF \
+  -DSWIG_DIR="$HOME/swig/share/swig" \
+  -DSWIG_EXECUTABLE="$HOME/swig/bin/swig" \
+  -DOPENSIM_WITH_TROPTER=OFF \
+  -DBUILD_TESTING=OFF
 
 make -j$(nproc)
 make install
 ```
 
-After installation, you should see:
-
-```
-~/simbody-install/
-├── include/SimTK/
-├── lib/
-│   └── cmake/simbody/SimbodyConfig.cmake
-└── bin/
-```
-
-### 🔍 Verify Simbody version
-
-Run:
+### ⚠️ Python bindings fix (known OpenSim issue)
 
 ```bash
-grep SIMBODY_VERSION_MAJOR ~/simbody-install/include/SimTKcommon/internal/common.h | head -n 1
-```
-
-Expected output:
-
-```
-#define SIMBODY_VERSION_MAJOR 3
-#define SIMBODY_VERSION_MINOR 7
-```
-
-Alternatively, check with:
-
-```bash
-strings ~/simbody-install/lib/libSimTKsimbody.so | grep "Simbody"
-```
-
-You should see something like `Simbody-3.7`.
-
----
-
-## 🧠 3. Build my_online_ik + RTOSIM
-
-Once Simbody is installed, simply run the provided build script.
-This script automatically builds all dependencies (Concurrency, RTOSIM, my_online_ik) and creates a temporary *fake Filter* to bypass unfinished components.
-
-```bash
-cd ~/my_online_ik
-bash scripts/build_all.sh | tee build_log.txt
-```
-
-This will:
-
-1. Check that **OpenSim 4.3** and **Simbody 3.7** are installed.
-2. Build and install **Concurrency**.
-3. Create a temporary **fake Filter** package.
-4. Build and install **RTOSIM** inside `my_online_ik/RTOSIM/install`.
-5. Build your project (**my_online_ik**) and produce the executable `online_ik_test`.
-
-Expected terminal output:
-
-```
-[info] Checking required dependencies...
-[ok] Concurrency installed at /home/user/concurrency-install
-[ok] Fake Filter ready at /home/user/filter-install
-[ok] RTOSIM installed.
-[success] my_online_ik built successfully 🎉
+mkdir -p ~/opensim-core-install/sdk/Python
+cp -r ~/build_opensim/Bindings/Python/Release/opensim \
+      ~/opensim-core-install/sdk/Python/
+cp ~/build_opensim/Bindings/Python/version.py \
+   ~/opensim-core-install/sdk/Python/
 ```
 
 ---
 
-## 📂 4. Typical Project Structure
+## 6. Environment Setup
 
-```
-my_online_ik/
-├── CMakeLists.txt
-├── main.cpp
-├── scripts/
-│   └── build_all.sh
-├── RTOSIM/
-│   ├── lib/
-│   ├── data/
-│   └── install/
-├── concurrency-install/
-├── filter-install/
-└── build/
-    └── online_ik_test
-```
-
----
-
-## 🧪 5. Running a Test
-
-You can now launch the executable:
+This project provides a **safe environment setup script**:
 
 ```bash
-cd ~/my_online_ik/build
-./online_ik_test
+source scripts/env.sh
 ```
 
-You should see output similar to:
+To verify:
 
-```
-[info] Updating Model file from 30000 to latest format...
-[error] Object::newInstanceOfType(): object type 'Schutte1993Muscle_Deprecated' is not a registered Object! It will be ignored.
+```bash
+source scripts/env.sh --print
 ```
 
-✅ This means OpenSim and RTOSIM are running correctly and loading the model.
+Expected output includes:
+
+* `OPENSIM_PREFIX`
+* `SIMBODY_PREFIX`
+* `LD_LIBRARY_PATH`
+* `PATH`
+
+⚠️ **Important**
+Do **not** manually export OpenSim paths.
+Always use `env.sh`.
 
 ---
 
-## 🧱 6. Troubleshooting
+## 7. Build my_online_ik + RTOSIM
 
-| Error                              | Cause                           | Fix                                                                                                         |
-| ---------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `libopenblas.so.0 not found`       | LAPACK/BLAS not installed       | `sudo apt install libopenblas-dev`                                                                          |
-| `spdlog missing from command line` | OpenSim’s spdlog not linked     | Ensure `find_library(SPDLOG_LIB spdlog PATHS $HOME/opensim-core-install/lib)` and link it in CMakeLists.txt |
-| `gcc version mismatch`             | RTOSIM fails with GCC 13        | Force build with GCC 11: `CC=gcc-11 CXX=g++-11`                                                             |
-| `Filter not found`                 | Filter library not yet compiled | The build script creates a temporary fake Filter; ignore this until later.                                  |
+From the project root:
+
+```bash
+./scripts/build_all.sh
+```
+
+This script builds, in order:
+
+1. Concurrency (RTOSIM dependency)
+2. Filter (RTOSIM dependency)
+3. RTOSIM
+4. `my_online_ik`
+
+All build artifacts are excluded from git.
+
+---
+
+## 8. Run
+
+```bash
+source scripts/env.sh
+./build/online_ik_test data/upperlimb-biorob.osim
+```
+
+To disable the Simbody visualizer:
+
+```bash
+./build/online_ik_test --no-viz data/upperlimb-biorob.osim
+```
+
+---
+
+## 9. Notes on Reproducibility
+
+* No binary artifacts are committed
+* OpenSim is built from pinned version `4.3`
+* RTOSIM is included under **Apache License 2.0**
+* Build is deterministic given the same compiler toolchain
+
+---
+
+## 10. Troubleshooting
+
+### ❌ `libSimTKcommon.so.X not found`
+
+```bash
+source scripts/env.sh
+```
+
+You forgot to load the environment.
+
+---
+
+### ❌ Terminal closes after sourcing env.sh
+
+You are using an **old version** of `env.sh`.
+Pull latest version and retry.
+
+---
+
+## License
+
+* **my_online_ik**: Apache License 2.0
+* **RTOSIM**: Apache License 2.0
+* **OpenSim**: Apache License 2.0
 
 
 
