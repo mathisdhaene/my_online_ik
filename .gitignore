@@ -12,6 +12,10 @@
 **/*.dll
 **/*.exe
 
+# Build helper directories
+/build_support/
+RTOSIM/build_support/
+
 # Installed RTOSIM or fake Filter
 **/install/
 **/fake-filter/
@@ -40,7 +44,7 @@ core
 .DS_Store
 Thumbs.db
 
-# Python virtual envs or notebooks (optional)
+# Python
 venv*/
 __pycache__/
 *.ipynb_checkpoints/
