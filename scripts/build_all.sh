@@ -105,42 +105,47 @@ fi
 echo "[ok] Dependencies look present."
 echo
 
+
+# ============================================================
+# 3) Build RTOSIM
+# ============================================================
 # ============================================================
 # 1) Build Concurrency
 # ============================================================
 echo "🧱 Building Concurrency..."
-mkdir -p "${BUILD_SUPPORT_DIR}/Concurrency"
-cd "${BUILD_SUPPORT_DIR}/Concurrency"
-
-cmake "${RTOSIM_DIR}/Dependencies/Concurrency" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="${CONCURRENCY_INSTALL}"
-
-make -j"$(nproc_safe)"
-make install
-echo "[ok] Concurrency installed at ${CONCURRENCY_INSTALL}"
+if [[ -d "/Dependencies/Concurrency" ]]; then
+  mkdir -p "/Concurrency"
+  cd "/Concurrency"
+  cmake "/Dependencies/Concurrency" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=""
+  make -j"1110 4 20 24 27 30 46 118 984 1110 1215nproc_safe)"
+  make install
+  echo "[ok] Concurrency installed at "
+else
+  echo "[skip] /Dependencies/Concurrency not found; using CONCURRENCY_INSTALL="
+fi
 echo
 
 # ============================================================
 # 2) Build Filter
 # ============================================================
 echo "🧩 Building Filter..."
-mkdir -p "${BUILD_SUPPORT_DIR}/Filter"
-cd "${BUILD_SUPPORT_DIR}/Filter"
-
-cmake "${RTOSIM_DIR}/Dependencies/Filter" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="${FILTER_INSTALL}" \
-  -DCMAKE_PREFIX_PATH="${CONCURRENCY_INSTALL}"
-
-make -j"$(nproc_safe)"
-make install
-echo "[ok] Filter installed at ${FILTER_INSTALL}"
+if [[ -d "/Dependencies/Filter" ]]; then
+  mkdir -p "/Filter"
+  cd "/Filter"
+  cmake "/Dependencies/Filter" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="" \
+    -DCMAKE_PREFIX_PATH=""
+  make -j"1110 4 20 24 27 30 46 118 984 1110 1215nproc_safe)"
+  make install
+  echo "[ok] Filter installed at "
+else
+  echo "[skip] /Dependencies/Filter not found; using FILTER_INSTALL="
+fi
 echo
 
-# ============================================================
-# 3) Build RTOSIM
-# ============================================================
 echo "🚀 Building RTOSIM..."
 cd "${RTOSIM_DIR}"
 rm -rf build install
