@@ -1,70 +1,81 @@
 #include <iostream>
 #include <vector>
 #include <thread>
-#include <chrono>
-#include <cstring>
-#include <cmath>
-
-#include <csignal>
-
-// POSIX networking
-#include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
+#include <cstring>
+#include <chrono>
+#include <cmath>    // for std::isfinite
 
-// RTOSIM
 #include "rtosim/queue/MarkerSetQueue.h"
 #include "rtosim/queue/GeneralisedCoordinatesQueue.h"
 #include "rtosim/IKSolverParallel.h"
 #include "rtosim/MarkersReferenceFromQueue.h"
 #include "rtosim/EndOfData.h"
 
-// OpenSim
-#include <OpenSim/OpenSim.h>
 #include <OpenSim/Common/STOFileAdapter.h>
 #include <OpenSim/Common/TimeSeriesTable.h>
+#include <OpenSim/Simulation/Model/Model.h>
+#include <OpenSim/Common/Set.h>
 
-// Concurrency
 #include <rtb/concurrency/Latch.h>
 
 // ==========================================================
-//                 ONE EURO FILTER (JOINTS)
+//              ONE EURO FILTER FOR JOINT ANGLES
 // ==========================================================
+
 class OneEuroFilter {
 public:
-    OneEuroFilter(double minCutoff = 4.0, double beta = 0.02, double dCutoff = 1.0)
-        : minCutoff(minCutoff), beta(beta), dCutoff(dCutoff),
-          initialized(false), prevValue(0.0), prevDeriv(0.0), prevTime(0.0) {}
+    OneEuroFilter(double minCutoff = 1.5, double beta = 0.02, double dCutoff = 1.0)
+        : minCutoff(minCutoff),
+          beta(beta),
+          dCutoff(dCutoff),
+          initialized(false),
+          prevValue(0.0),
+          prevDeriv(0.0),
+          prevTime(0.0) {}
 
     double filter(double x, double t) {
         if (!initialized) {
             initialized = true;
             prevValue = x;
+            prevDeriv = 0.0;
             prevTime = t;
             return x;
         }
 
         double dt = t - prevTime;
-        if (dt <= 0.0) dt = 1.0 / 30.0;
+        if (dt <= 0.0)
+            dt = 1.0 / 30.0;
 
+        // Derivative (velocity) estimation
         double dx = (x - prevValue) / dt;
+
         double alphaD = computeAlpha(dCutoff, dt);
         prevDeriv = alphaD * dx + (1.0 - alphaD) * prevDeriv;
 
+        // Adaptive cutoff based on speed
         double cutoff = minCutoff + beta * std::fabs(prevDeriv);
         double alpha = computeAlpha(cutoff, dt);
 
+        // EMA smoothing
         double filtered = alpha * x + (1.0 - alpha) * prevValue;
+
         prevValue = filtered;
         prevTime = t;
+
         return filtered;
     }
 
 private:
     bool initialized;
-    double prevValue, prevDeriv, prevTime;
-    double minCutoff, beta, dCutoff;
+    double prevValue;
+    double prevDeriv;
+    double prevTime;
+
+    double minCutoff;
+    double beta;
+    double dCutoff;
 
     double computeAlpha(double cutoff, double dt) {
         const double PI = 3.14159265358979323846;
@@ -74,25 +85,41 @@ private:
 };
 
 // ==========================================================
-//              MARKER FILTER (OUTLIERS + SMOOTH)
+//          MARKER FILTER: OUTLIERS + LIGHT SMOOTHING
 // ==========================================================
+
 struct MarkerFilter {
+
     struct MarkerState {
         bool initialized = false;
-        SimTK::Vec3 lastRaw;
-        SimTK::Vec3 xHat;
+        SimTK::Vec3 lastRaw;   // last raw sample
+        SimTK::Vec3 xHat;      // filtered estimate
         double lastTime = 0.0;
     };
 
     std::vector<MarkerState> states;
-    double maxJump, maxVelocity, alpha;
 
-    MarkerFilter(int n, double mj = 0.18, double mv = 6.0, double a = 0.6)
-        : states(n), maxJump(mj), maxVelocity(mv), alpha(a) {}
+    double maxJump;        // meters
+    double maxVelocity;    // meters/second
+    double alpha;          // smoothing factor (0.0–1.0)
+
+    MarkerFilter(int numMarkers,
+                 double maxJumpMeters = 1.5,
+                 double maxVelocityMetersPerSec = 50.0,
+                 double alpha_ = 0.1,
+                 double /*minCutoffHz*/ = 0.0,
+                 double /*beta_*/ = 0.0,
+                 double /*dCutoffHz*/ = 0.0)
+        : states(numMarkers),
+          maxJump(maxJumpMeters),
+          maxVelocity(maxVelocityMetersPerSec),
+          alpha(alpha_) {}
 
     SimTK::Vec3 filterOne(int idx, const SimTK::Vec3& raw, double t) {
+
         auto& s = states[idx];
 
+        // First-sample init
         if (!s.initialized) {
             s.initialized = true;
             s.lastRaw = raw;
@@ -102,242 +129,346 @@ struct MarkerFilter {
         }
 
         double dt = t - s.lastTime;
-        if (dt <= 0.0) dt = 1.0 / 30.0;
+        if (dt <= 0.0)
+            dt = 1.0 / 30.0;
 
+        // --- OUTLIER DETECTION ---
         double jump = (raw - s.lastRaw).norm();
-        double vel = jump / dt;
-        bool outlier = (jump > maxJump) || (vel > maxVelocity);
+        double velocity = jump / dt;
+        bool outlier = (jump > maxJump) || (velocity > maxVelocity);
 
+        if (outlier) {
+            std::cout << "[OUTLIER] Marker " << idx
+                      << " at time " << t
+                      << " (jump=" << jump
+                      << ", vel=" << velocity << ")" << std::endl;
+        }
+
+        // --- INPUT ---
         SimTK::Vec3 input = outlier ? s.xHat : raw;
+
+        // --- SMOOTHING ---
         s.xHat = alpha * input + (1.0 - alpha) * s.xHat;
 
-        s.lastRaw = raw;
+        // --- STATE UPDATE ---
+        s.lastRaw  = raw;
         s.lastTime = t;
+
         return s.xHat;
     }
 };
 
-// ==========================================================
-//                    SOCKET RECEIVER
-// ==========================================================
-static constexpr int PORT = 5555;
-static constexpr int NUM_MARKERS = 20;
-static constexpr int FRAME_SIZE = NUM_MARKERS * 3 * sizeof(float);
+
+		
+
+    
+
+
+// ======================== SOCKET SETTINGS ========================
+const int PORT = 5555;
+const int NUM_MARKERS = 20;
+const int BYTES_PER_MARKER = 3 * sizeof(float);
+const int FRAME_SIZE = NUM_MARKERS * BYTES_PER_MARKER;
+
+// ======================== SOCKET RECEIVER ========================
 
 void socketReceiver(rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue) {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in address{};
+    int server_fd, new_socket;
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
+    float buffer[NUM_MARKERS * 3];
+    int frameCount = 0;
+
+    // Marker filter: outliers + light smoothing
+    MarkerFilter filter(NUM_MARKERS, 0.18, 6.0, 0.6);
+
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
+    bind(server_fd, (struct sockaddr*)&address, sizeof(address));
+    listen(server_fd, 3);
+    new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
 
-    bind(server_fd, (sockaddr*)&address, sizeof(address));
-    listen(server_fd, 1);
-
-    int client_fd = accept(server_fd, nullptr, nullptr);
-
-    MarkerFilter filter(NUM_MARKERS);
-    std::vector<float> buffer(NUM_MARKERS * 3);
-    int frameCount = 0;
 
     while (true) {
-        int n = read(client_fd, buffer.data(), FRAME_SIZE);
-        if (n <= 0) break;
+        int bytesRead = read(new_socket, buffer, FRAME_SIZE);
+        if (bytesRead <= 0)
+            break;
 
         rtosim::MarkerSetFrame frame;
+
+        // Use a simple synthetic timestamp at 30 Hz
         frame.time = frameCount * (1.0 / 30.0);
         double t = frame.time;
+        frameCount++;
 
         for (int i = 0; i < NUM_MARKERS; ++i) {
-            SimTK::Vec3 raw(buffer[3*i], buffer[3*i+1], buffer[3*i+2]);
-            frame.data.push_back(filter.filterOne(i, raw, t));
+            SimTK::Vec3 raw(buffer[i * 3 + 0],
+                            buffer[i * 3 + 1],
+                            buffer[i * 3 + 2]);
+
+            // Protect against NaNs / Infs
+            if (!std::isfinite(raw[0]) ||
+                !std::isfinite(raw[1]) ||
+                !std::isfinite(raw[2])) {
+                raw = SimTK::Vec3(0);
+            }
+
+            SimTK::Vec3 clean = filter.filterOne(i, raw, t);
+            rtosim::MarkerData marker = clean;
+            frame.data.push_back(marker);
         }
 
         markerQueue.push(frame);
-        frameCount++;
+        std::cout << "[SocketReceiver] Frame #" << frameCount
+                  << " pushed at time: " << frame.time << std::endl;
     }
 
     markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
-    close(client_fd);
+    close(new_socket);
     close(server_fd);
 }
 
-// ==========================================================
-//                           MAIN
-// ==========================================================
-#include <csignal>   // +++
-#include <string>    // +++ (au cas où)
-
-// ...
+// ======================== MAIN ========================
 
 int main(int argc, char** argv) {
-    // Avoid SIGPIPE killing the process (Simbody still throws, but we handle it)
-    std::signal(SIGPIPE, SIG_IGN);
 
     if (argc < 2) {
-        std::cerr << "Usage: ./online_ik_test [--no-viz] <model.osim>\n";
+        std::cerr << "Usage: ./online_ik_test <model.osim> [output_directory]" << std::endl;
         return 1;
     }
 
-    // -------- Parse args --------
-    bool useViz = true;
-    std::string modelPath;
+    // Model path is required
+    std::string modelPath = argv[1];
 
-    for (int i = 1; i < argc; ++i) {
-        std::string a = argv[i];
-        if (a == "--no-viz") {
-            useViz = false;
-        } else if (!a.empty() && a[0] == '-') {
-            std::cerr << "[warn] Unknown flag: " << a << "\n";
-        } else {
-            modelPath = a;
-        }
-    }
+    // Optional output directory for the .mot file
+    std::string outputDir = (argc >= 3) ? argv[2] : ".";
 
-    if (modelPath.empty()) {
-        std::cerr << "Usage: ./online_ik_test [--no-viz] <model.osim>\n";
-        return 1;
-    }
+    // Ensure trailing slash is optional
+    if (outputDir.back() == '/')
+        outputDir.pop_back();
 
-    std::cout << "[Init] Using model: " << modelPath << std::endl;
+    // Build final .mot path
+    std::string outputMotPath = outputDir + "/output_results.mot";
 
     rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame> markerQueue;
     rtosim::IKoutputs<rtosim::GeneralisedCoordinatesFrame> outputQueue;
-    rtb::Concurrency::Latch doneWithSubscriptions(1), doneWithExecution(1);
+    rtb::Concurrency::Latch doneWithSubscriptions(1);
+    rtb::Concurrency::Latch doneWithExecution(1);
 
-    // -------- Load model (single-thread) --------
     OpenSim::Model model(modelPath);
-    model.setUseVisualizer(useViz);
-    SimTK::State state = model.initSystem();
+    model.setUseVisualizer(true);  // Enable visualization
 
-    // We keep a pointer so we can compile even when --no-viz is used
-    SimTK::Visualizer* simbodyViz = nullptr;
+    auto& state = model.initSystem();  // Initialize system & visualizer
+    auto& viz = model.updVisualizer().updSimbodyVisualizer();
+    viz.setBackgroundType(SimTK::Visualizer::GroundAndSky);
 
-    if (useViz) {
-        auto& viz = model.updVisualizer().updSimbodyVisualizer();
-        viz.setBackgroundType(SimTK::Visualizer::GroundAndSky);
-        simbodyViz = &viz;
+    std::cout << "[Init] Model system and visualizer initialized." << std::endl;
 
-        // ------------------------------------------------------------------
-        // CRITICAL: warm-up report BEFORE creating any threads.
-        // This forces the visualizer process to spawn while we're single-threaded.
-        // ------------------------------------------------------------------
-        try {
-            model.realizePosition(state);
-            simbodyViz->report(state);
-            std::cout << "[viz] warm-up report ok\n";
-        } catch (const SimTK::Exception::Base& e) {
-            std::cerr << "[viz] warm-up failed, disabling viz: " << e.what() << "\n";
-            useViz = false;
-            simbodyViz = nullptr;
-        } catch (const std::exception& e) {
-            std::cerr << "[viz] warm-up failed, disabling viz: " << e.what() << "\n";
-            useViz = false;
-            simbodyViz = nullptr;
-        } catch (...) {
-            std::cerr << "[viz] warm-up failed (unknown), disabling viz\n";
-            useViz = false;
-            simbodyViz = nullptr;
-        }
-    }
 
-    // -------- IK SOLVER (creates its own model internally from modelPath) --------
     rtosim::IKSolverParallel ikSolver(
-        markerQueue, outputQueue,
-        doneWithSubscriptions, doneWithExecution,
-        modelPath, 1e-4, 10.0
+        markerQueue,
+        outputQueue,
+        doneWithSubscriptions,
+        doneWithExecution,
+        modelPath,
+        1e-4,
+        10.0
     );
 
-    // ---- Custom IK marker weights ----
+    // ======================
+    //  CUSTOM MARKER WEIGHTS
+    // ======================
     OpenSim::IKTaskSet ikTasks;
-    auto addTask = [&](const std::string& n, double w) {
+
+    auto addTask = [&](const std::string& name, double w) {
         auto* t = new OpenSim::IKMarkerTask();
-        t->setName(n); t->setApply(true); t->setWeight(w);
+        t->setName(name);
+        t->setApply(true);
+        t->setWeight(w);
         ikTasks.adoptAndAppend(t);
     };
 
-    addTask("ACD",1.0); addTask("CLAD",1.0); addTask("CLAG",1.0);
-    addTask("MAN",0.8); addTask("XYP",0.8); addTask("T8",0.8); addTask("C7",0.8);
-    addTask("MTACM",0.2); addTask("MTACB",0.2); addTask("MTACL",0.2);
-    addTask("MTHA",0.3); addTask("MTHP",0.25); addTask("MTBA",0.25); addTask("MTBP",0.25);
-    addTask("EL",0.0); addTask("EM",0.5);
-    addTask("PSU",0.8); addTask("PSR",0.8);
-    addTask("MC5",0.9); addTask("MC2",0.9);
+    // Torso
+    addTask("ACD", 1.0);
+    addTask("CLAD", 1.0);
+    addTask("CLAG", 1.0);
+    addTask("MAN", 0.8);
+    addTask("XYP", 0.8);
+    addTask("T8", 0.8);
+    addTask("C7", 0.8);
+
+    // Scapula
+    addTask("MTACM", 0.2);
+    addTask("MTACB", 0.2);
+    addTask("MTACL", 0.2);
+
+    // Humerus
+    addTask("MTHA", 0.3);
+    addTask("MTHP", 0.25);
+    addTask("MTBA", 0.25);
+    addTask("MTBP", 0.25);
+
+    // Elbow
+    addTask("EL", 0);
+    addTask("EM", 0.5);
+
+    // Forearm
+    addTask("PSU", 0.8);
+    addTask("PSR", 0.8);
+
+    // Hand
+    addTask("MC5", 0.9);
+    addTask("MC2", 0.9);
 
     ikSolver.setInverseKinematicsTaskSet(ikTasks);
 
-    // -------- Start threads AFTER viz warm-up --------
+    // NOW start IK thread
     std::thread ikThread(std::ref(ikSolver));
+
+
+
+
     std::thread socketThread(socketReceiver, std::ref(markerQueue));
 
-    // -------- MAIN LOOP --------
+    int frameCount = 0;
     std::vector<OneEuroFilter> jointFilters;
-    bool filtersInit = false;
-    bool viz_ok = (simbodyViz != nullptr);
+    bool jointFiltersInitialized = false;
+    std::vector<std::pair<double, std::vector<double>>> allResults;
 
+    // ================= MAIN IK LOOP =================
     while (true) {
-        auto res = outputQueue.pop();
-        if (rtosim::EndOfData::isEod(res)) break;
+        auto result = outputQueue.pop();
+        if (rtosim::EndOfData::isEod(result))
+            break;
 
-        auto q = res.data.getQ();
+        auto start = std::chrono::high_resolution_clock::now();
 
-        // Init filters once we know q size
-        if (!filtersInit) {
-            jointFilters.resize(q.size());
-            filtersInit = true;
+        std::cout << "[Main] Processing frame at time: " << result.time << std::endl;
+        auto qVals = result.data.getQ();
+
+        // Initialize joint filters on first frame
+        if (!jointFiltersInitialized) {
+            jointFilters.resize(
+                qVals.size(),
+                OneEuroFilter(
+                    /* minCutoff */ 4.0,   // more responsive
+                    /* beta      */ 0.02,  // lighter smoothing
+                    /* dCutoff   */ 1.0
+                )
+            );
+            jointFiltersInitialized = true;
         }
 
-        // Filter joints
-        for (size_t i = 0; i < q.size(); ++i)
-            q[i] = jointFilters[i].filter(q[i], res.time);
-
-        // Safety: skip non-finite q (prevents visualizer/realize issues)
-        bool bad = false;
-        for (double v : q) {
-            if (!std::isfinite(v)) { bad = true; break; }
-        }
-        if (bad) {
-            std::cerr << "[warn] Non-finite q at t=" << res.time << " (skipping frame)\n";
-            continue;
+        // One-Euro filtering of each joint angle
+        for (int i = 0; i < (int)qVals.size(); ++i) {
+            // qVals[i] = jointFilters[i].filter(qVals[i], result.time);
+            qVals[i] = qVals[i];
         }
 
-        auto& coords = model.updCoordinateSet();
-        if ((int)q.size() != coords.getSize()) {
-            std::cerr << "[warn] q.size()=" << q.size()
-                      << " != coords=" << coords.getSize() << " (skipping frame)\n";
-            continue;
+        auto& coordSet = model.updCoordinateSet();
+        for (int i = 0; i < coordSet.getSize(); ++i) {
+            coordSet[i].setValue(state, qVals[i]);
         }
-
-        for (int i = 0; i < coords.getSize(); ++i)
-            coords[i].setValue(state, q[i]);
 
         model.realizePosition(state);
+        viz.report(state);
 
-        // Robust viz reporting
-        if (viz_ok) {
-            try {
-                simbodyViz->report(state);
-            } catch (const SimTK::Exception::Base& e) {
-                std::cerr << "[viz] report failed, disabling viz: " << e.what() << "\n";
-                viz_ok = false;
-            } catch (const std::exception& e) {
-                std::cerr << "[viz] report failed, disabling viz: " << e.what() << "\n";
-                viz_ok = false;
-            } catch (...) {
-                std::cerr << "[viz] report failed (unknown), disabling viz\n";
-                viz_ok = false;
-            }
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        double duration_ms = duration_us / 1000.0;
+
+        std::cout << "[IK Timing] Frame " << frameCount << " took "
+                  << duration_ms << " ms (" << duration_us << " μs)." << std::endl;
+
+        allResults.emplace_back(result.time, qVals);
+        frameCount++;
+    }
+
+    // Optional: drain any remaining frames if RTOSIM pushes after EoD
+    while (true) {
+        auto remainingResult = outputQueue.pop();
+        if (rtosim::EndOfData::isEod(remainingResult))
+            break;
+
+        auto start = std::chrono::high_resolution_clock::now();
+
+        std::cout << "[Main] Processing remaining frame at time: "
+                  << remainingResult.time << std::endl;
+        auto qVals = remainingResult.data.getQ();
+
+        auto& coordSet = model.updCoordinateSet();
+        for (int i = 0; i < coordSet.getSize(); ++i) {
+            coordSet[i].setValue(state, qVals[i]);
         }
+
+        model.realizePosition(state);
+        viz.report(state);
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        double duration_ms = duration_us / 1000.0;
+
+        std::cout << "[IK Timing] Frame " << frameCount << " took "
+                  << duration_ms << " ms (" << duration_us << " μs)." << std::endl;
+
+        for (const auto& q : qVals)
+            std::cout << q << " ";
+        std::cout << std::endl;
+
+        allResults.emplace_back(remainingResult.time, qVals);
+        frameCount++;
     }
 
     socketThread.join();
     ikThread.join();
 
-    if (useViz) {
-        std::cout << "Press ENTER to close visualizer..." << std::endl;
-        std::cin.get();
+    // ================= WRITE .MOT =================
+    if (!allResults.empty()) {
+        OpenSim::TimeSeriesTable qTable;
+        OpenSim::Array<std::string> coordNames;
+        model.getCoordinateSet().getNames(coordNames);
+
+        std::vector<std::string> stdCoordNames;
+        for (int i = 0; i < coordNames.getSize(); ++i) {
+            stdCoordNames.push_back(coordNames[i]);
+        }
+        qTable.setColumnLabels(stdCoordNames);
+
+        double lastTime = -1.0;
+        for (const auto& [time, qVals] : allResults) {
+            if (time <= lastTime)
+                continue;
+
+            SimTK::RowVector row((int)qVals.size());
+            for (int i = 0; i < (int)qVals.size(); ++i)
+                row[i] = qVals[i];
+
+            qTable.appendRow(time, row);
+            lastTime = time;
+        }
+
+				// Write .mot to the chosen directory
+				try {
+						OpenSim::STOFileAdapter::write(qTable, outputMotPath);
+						std::cout << "[Main] Saved " << outputMotPath
+								      << " with " << allResults.size() << " frames." << std::endl;
+				} catch (const std::exception& e) {
+						std::cerr << "[ERROR] Failed to save " << outputMotPath
+								      << " : " << e.what() << std::endl;
+				}
+
+        std::cout << "[Main] Saved output_results.mot with "
+                  << allResults.size() << " frames." << std::endl;
+
+    } else {
+        std::cout << "[Main] No frames to save." << std::endl;
     }
+		// ----- Close Simbody Visualizer (OpenSim 4.x workaround) -----
+		system("pkill -f simbody-visualizer");
 
     return 0;
 }
-
