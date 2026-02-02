@@ -36,3 +36,30 @@ target_link_libraries(online_ik_test
 
         pthread
 )
+
+add_executable(online_ik_offline offline.cpp)
+
+target_link_libraries(online_ik_offline
+    PRIVATE
+        rtb::Common
+        rtb::Utilities
+        rtb::InverseKinematics
+        rtb::InverseDynamics
+        rtb::SignalProcessing
+        rtb::InputDevice
+        rtb::OutputDevice
+
+        rtb::Concurrency
+
+        osimSimulation
+        osimCommon
+        osimTools
+        osimAnalyses
+        osimActuators
+
+        SimTKsimbody
+        SimTKmath
+        SimTKcommon
+
+        pthread
+)
