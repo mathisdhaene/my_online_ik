@@ -40,7 +40,8 @@ export CPLUS_INCLUDE_PATH="$HOME/spdlog-1.5.0-install/include:${CPLUS_INCLUDE_PA
 # ----------------------------
 # Helpers
 # ----------------------------
-nproc_safe() { command -v nproc >/dev/null 2>&1 && nproc || echo 4; }
+# Limit parallel builds by default on shared machines; override with JOBS.
+nproc_safe() { echo "${JOBS:-4}"; }
 abspath() { python3 - <<'PY' "$1"
 import os,sys
 print(os.path.abspath(os.path.expanduser(sys.argv[1])))
@@ -119,7 +120,7 @@ if [[ -d "/Dependencies/Concurrency" ]]; then
   cmake "/Dependencies/Concurrency" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=""
-  make -j"1110 4 20 24 27 30 46 118 984 1110 1215nproc_safe)"
+  make -j"$(nproc_safe)"
   make install
   echo "[ok] Concurrency installed at "
 else
@@ -138,7 +139,7 @@ if [[ -d "/Dependencies/Filter" ]]; then
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="" \
     -DCMAKE_PREFIX_PATH=""
-  make -j"1110 4 20 24 27 30 46 118 984 1110 1215nproc_safe)"
+  make -j"$(nproc_safe)"
   make install
   echo "[ok] Filter installed at "
 else
@@ -204,4 +205,3 @@ echo "[tip] Runtime environment (recommended):"
 echo "  export LD_LIBRARY_PATH=\"${SIMBODY_PREFIX}/lib:${OPENSIM_PREFIX}/lib:\$LD_LIBRARY_PATH\""
 echo "  ./build/online_ik_test --no-viz data/upperlimb-biorob.osim"
 echo
-
