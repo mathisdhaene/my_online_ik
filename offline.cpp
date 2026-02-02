@@ -23,6 +23,8 @@
 #include <OpenSim/Common/TRCFileAdapter.h>
 #include <OpenSim/Simulation/Model/Model.h>
 #include <OpenSim/Common/Set.h>
+#include <OpenSim/Common/DataAdapter.h>
+
 
 #include <rtb/concurrency/Latch.h>
 
@@ -177,8 +179,36 @@ void trcProducer(const std::string& trcPath,
     std::cout << "[TRC] Reading: " << trcPath << std::endl;
 
     OpenSim::TimeSeriesTableVec3 table;
+
     try {
-        table = OpenSim::TRCFileAdapter::read(trcPath);
+        // OpenSim 4.3: TRCFileAdapter::read() is a non-static member (DataAdapter API)
+        OpenSim::TRCFileAdapter adapter;
+        OpenSim::DataAdapter::OutputTables tables = adapter.read(trcPath);
+
+        // Usually the TRC adapter stores the markers table under "markers"
+        auto it = tables.find("markers");
+        if (it == tables.end()) {
+            std::cout << "[TRC] WARNING: key 'markers' not found. Available tables:\n";
+            for (const auto& kv : tables) {
+                std::cout << "  - " << kv.first << "\n";
+            }
+            throw std::runtime_error("[TRC] No 'markers' table found in TRC output.");
+        }
+
+        // Downcast from AbstractDataTable to TimeSeriesTableVec3
+        const auto& tblPtr = it->second;  // shared_ptr<AbstractDataTable>
+        if (!tblPtr) {
+            throw std::runtime_error("[TRC] 'markers' table pointer is null.");
+        }
+
+        const auto* vec3Tbl = dynamic_cast<const OpenSim::TimeSeriesTableVec3*>(tblPtr.get());
+        if (!vec3Tbl) {
+            throw std::runtime_error("[TRC] 'markers' table is not a TimeSeriesTableVec3.");
+        }
+
+        table = *vec3Tbl; // copy
+
+
     } catch (const std::exception& e) {
         throw std::runtime_error(std::string("[TRC] Failed to read TRC: ") + e.what());
     }
@@ -204,8 +234,7 @@ void trcProducer(const std::string& trcPath,
 
     std::cout << "[TRC] Rows: " << nRows << " | Markers expected: " << nMarkers << "\n";
 
-    // Same filter parameters as your current online receiver:
-    // MarkerFilter filter(NUM_MARKERS, 0.18, 6.0, 0.6);
+    // Same filter parameters as your current online receiver
     MarkerFilter filter(nMarkers, /*maxJump*/0.18, /*maxVel*/6.0, /*alpha*/0.6);
 
     for (int r = 0; r < nRows; ++r) {
@@ -247,6 +276,7 @@ void trcProducer(const std::string& trcPath,
     markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
     std::cout << "[TRC] EndOfData pushed.\n";
 }
+
 
 // ==========================================================
 //                         MAIN
