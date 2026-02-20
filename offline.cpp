@@ -12,6 +12,8 @@
 #include <cmath>        // std::isfinite
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
+#include <fstream>
 
 #include "rtosim/queue/MarkerSetQueue.h"
 #include "rtosim/queue/GeneralisedCoordinatesQueue.h"
@@ -24,6 +26,8 @@
 #include <OpenSim/Simulation/Model/Model.h>
 #include <OpenSim/Common/Set.h>
 #include <OpenSim/Common/DataAdapter.h>
+#include <OpenSim/Tools/IKCoordinateTask.h>
+#include <OpenSim/Tools/InverseKinematicsTool.h>
 
 
 #include <rtb/concurrency/Latch.h>
@@ -160,21 +164,53 @@ struct MarkerFilter {
 
 static std::vector<std::string> kMarkerOrder = {
     // Torso
-    "ACD","CLAD","CLAG","MAN","XYP","T8","C7",
+    "MAN","CLAG","C7","T8","XYP","ACD",
     // Scapula
-    "MTACM","MTACB","MTACL",
+    "MTACB","MTACM","MTACL",
     // Humerus
-    "MTHA","MTHP","MTBA","MTBP",
     // Elbow
     "EL","EM",
     // Forearm
-    "PSU","PSR",
-    // Hand
-    "MC5","MC2"
+    "PSR","PSU", "CLAD"
 };
 
+static void forceInDegreesNoInMot(const std::string& motPath) {
+    std::ifstream in(motPath);
+    if (!in.is_open()) return;
+
+    std::vector<std::string> lines;
+    lines.reserve(256);
+    std::string line;
+    bool foundInDegrees = false;
+    bool insertedBeforeEndHeader = false;
+    while (std::getline(in, line)) {
+        if (line.rfind("inDegrees=", 0) == 0) {
+            lines.emplace_back("inDegrees=no");
+            foundInDegrees = true;
+        } else if (!foundInDegrees && !insertedBeforeEndHeader && line == "endheader") {
+            lines.emplace_back("inDegrees=no");
+            lines.emplace_back(line);
+            insertedBeforeEndHeader = true;
+        } else {
+            lines.emplace_back(line);
+        }
+    }
+    in.close();
+
+    if (!foundInDegrees && !insertedBeforeEndHeader) {
+        lines.insert(lines.begin(), "inDegrees=no");
+    }
+
+    std::ofstream out(motPath, std::ios::trunc);
+    if (!out.is_open()) return;
+    for (const auto& l : lines) {
+        out << l << "\n";
+    }
+}
+
 void trcProducer(const std::string& trcPath,
-                 rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue)
+                 rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue,
+                 bool enableFilter)
 {
     std::cout << "[TRC] Reading: " << trcPath << std::endl;
 
@@ -253,6 +289,8 @@ void trcProducer(const std::string& trcPath,
             auto it = colIndex.find(name);
             if (it != colIndex.end()) {
                 raw = row[it->second];
+                raw /= 1; // mm -> m
+
             }
 
             // Protect against NaNs / Infs
@@ -260,7 +298,7 @@ void trcProducer(const std::string& trcPath,
                 raw = SimTK::Vec3(0);
             }
 
-            SimTK::Vec3 clean = filter.filterOne(m, raw, t);
+            SimTK::Vec3 clean = enableFilter ? filter.filterOne(m, raw, t) : raw;
             rtosim::MarkerData marker = clean;
             frame.data.push_back(marker);
         }
@@ -286,13 +324,29 @@ int main(int argc, char** argv)
 {
     if (argc < 3) {
         std::cerr << "Usage:\n"
-                  << "  ./offline_ik_noviz <model.osim> <markers.trc> [output_directory]\n";
+                  << "  ./offline_ik_noviz <model.osim> <markers.trc> [output_directory] [ik_tasks.xml] [--iktool] [--parity]\n"
+                  << "  ./offline_ik_noviz <model.osim> <markers.trc> <ik_tasks.xml> [--iktool] [--parity]\n";
         return 1;
     }
 
     const std::string modelPath = argv[1];
     const std::string trcPath   = argv[2];
-    std::string outputDir       = (argc >= 4) ? argv[3] : ".";
+    std::string outputDir       = ".";
+    std::string ikTasksPath;
+    bool useIkTool = false;
+    bool parityMode = false;
+    for (int i = 3; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--iktool") {
+            useIkTool = true;
+        } else if (arg == "--parity") {
+            parityMode = true;
+        } else if (arg.size() >= 4 && arg.substr(arg.size() - 4) == ".xml") {
+            ikTasksPath = arg;
+        } else {
+            outputDir = arg;
+        }
+    }
 
     if (!outputDir.empty() && outputDir.back() == '/')
         outputDir.pop_back();
@@ -313,6 +367,95 @@ int main(int argc, char** argv)
 
     std::cout << "[Init] Model system initialized (NO visualizer).\n";
 
+    // Debug: verify producer marker list against model marker names/order.
+    OpenSim::Array<std::string> modelMarkerNamesArray;
+    const_cast<OpenSim::MarkerSet&>(model.getMarkerSet()).getMarkerNames(modelMarkerNamesArray);
+    std::vector<std::string> modelMarkerNames;
+    modelMarkerNames.reserve(modelMarkerNamesArray.getSize());
+    for (int i = 0; i < modelMarkerNamesArray.getSize(); ++i) {
+        modelMarkerNames.push_back(modelMarkerNamesArray[i]);
+    }
+
+    if ((int)modelMarkerNames.size() != (int)kMarkerOrder.size()) {
+        std::cout << "[DEBUG] Marker count mismatch: model=" << modelMarkerNames.size()
+                  << " producer(kMarkerOrder)=" << kMarkerOrder.size() << "\n";
+    }
+
+    const int minCount = std::min((int)modelMarkerNames.size(), (int)kMarkerOrder.size());
+    int orderMismatches = 0;
+    for (int i = 0; i < minCount; ++i) {
+        if (modelMarkerNames[i] != kMarkerOrder[i]) {
+            if (orderMismatches < 10) {
+                std::cout << "[DEBUG] Marker order mismatch at index " << i
+                          << ": model='" << modelMarkerNames[i]
+                          << "' producer='" << kMarkerOrder[i] << "'\n";
+            }
+            ++orderMismatches;
+        }
+    }
+    if (orderMismatches > 0) {
+        std::cout << "[DEBUG] Total marker order mismatches: " << orderMismatches << "\n";
+    } else {
+        std::cout << "[DEBUG] Marker order check: producer order matches model order for "
+                  << minCount << " markers.\n";
+    }
+
+    std::unordered_set<std::string> modelSet(modelMarkerNames.begin(), modelMarkerNames.end());
+    std::unordered_set<std::string> producerSet(kMarkerOrder.begin(), kMarkerOrder.end());
+    int printedMissingFromModel = 0;
+    for (const auto& n : kMarkerOrder) {
+        if (modelSet.find(n) == modelSet.end()) {
+            if (printedMissingFromModel < 10) {
+                std::cout << "[DEBUG] Producer marker not found in model: '" << n << "'\n";
+            }
+            ++printedMissingFromModel;
+        }
+    }
+    int printedMissingFromProducer = 0;
+    for (const auto& n : modelMarkerNames) {
+        if (producerSet.find(n) == producerSet.end()) {
+            if (printedMissingFromProducer < 10) {
+                std::cout << "[DEBUG] Model marker not found in producer list: '" << n << "'\n";
+            }
+            ++printedMissingFromProducer;
+        }
+    }
+
+    // Force producer marker order to model marker order.
+    // This removes hardcoded-order/model-specific mismatches.
+    kMarkerOrder = modelMarkerNames;
+    std::cout << "[DEBUG] Producer marker order switched to model marker order ("
+              << kMarkerOrder.size() << " markers).\n";
+
+    if (useIkTool) {
+        std::cout << "[DEBUG] Running OpenSim InverseKinematicsTool path.\n";
+        OpenSim::InverseKinematicsTool ikTool;
+        ikTool.setModel(model);
+        ikTool.setMarkerDataFileName(trcPath);
+        ikTool.setOutputMotionFileName(outputMotPath);
+        ikTool.upd_accuracy() = 1e-4;
+        ikTool.upd_constraint_weight() = 10.0;
+        ikTool.upd_report_errors() = true;
+
+        auto& tasks = ikTool.getIKTaskSet();
+        for (const auto& markerName : modelMarkerNames) {
+            auto* t = new OpenSim::IKMarkerTask();
+            t->setName(markerName);
+            t->setApply(true);
+            t->setWeight(1.0);
+            tasks.adoptAndAppend(t);
+        }
+
+        const bool ok = ikTool.run();
+        if (!ok) {
+            std::cerr << "[ERROR] InverseKinematicsTool::run() failed.\n";
+            return 2;
+        }
+        std::cout << "[Main] Saved " << outputMotPath << " via IKTool.\n";
+        std::cout << "[Main] Finished OFFLINE IK (IKTool mode).\n";
+        return 0;
+    }
+
     // IK solver
     rtosim::IKSolverParallel ikSolver(
         markerQueue,
@@ -323,58 +466,25 @@ int main(int argc, char** argv)
         1e-4,
         10.0
     );
+    ikSolver.setParityMode(parityMode);
+    if (parityMode) {
+        std::cout << "[DEBUG] Parity mode enabled: persistent IK tracking, no marker filter.\n";
+    }
 
     // ======================
-    //  CUSTOM MARKER WEIGHTS (MATCH YOUR CURRENT ONLINE SCRIPT)
+    //  IK TASKS
     // ======================
-    OpenSim::IKTaskSet ikTasks;
-
-    auto addTask = [&](const std::string& name, double w) {
-        auto* t = new OpenSim::IKMarkerTask();
-        t->setName(name);
-        t->setApply(true);
-        t->setWeight(w);
-        ikTasks.adoptAndAppend(t);
-    };
-
-    // Torso
-    addTask("ACD", 1.0);
-    addTask("CLAD", 1.0);
-    addTask("CLAG", 1.0);
-    addTask("MAN", 0.8);
-    addTask("XYP", 0.8);
-    addTask("T8", 0.8);
-    addTask("C7", 0.8);
-
-    // Scapula
-    addTask("MTACM", 0.2);
-    addTask("MTACB", 0.2);
-    addTask("MTACL", 0.2);
-
-    // Humerus
-    addTask("MTHA", 0.3);
-    addTask("MTHP", 0.25);
-    addTask("MTBA", 0.25);
-    addTask("MTBP", 0.25);
-
-    // Elbow  (MATCH ONLINE: EL=0, EM=0.5)
-    addTask("EL", 0.0);
-    addTask("EM", 0.5);
-
-    // Forearm
-    addTask("PSU", 0.8);
-    addTask("PSR", 0.8);
-
-    // Hand
-    addTask("MC5", 0.9);
-    addTask("MC2", 0.9);
-
-    ikSolver.setInverseKinematicsTaskSet(ikTasks);
+    if (!ikTasksPath.empty()) {
+        ikSolver.setInverseKinematicsTaskSet(ikTasksPath);
+        std::cout << "[DEBUG] Loaded IK tasks from: " << ikTasksPath << "\n";
+    } else {
+        std::cout << "[DEBUG] No IK task file: using solver defaults (all marker weights = 1).\n";
+    }
 
     // Producer thread (TRC) + IK thread
     std::thread producerThread([&](){
         try {
-            trcProducer(trcPath, markerQueue);
+            trcProducer(trcPath, markerQueue, !parityMode);
         } catch (const std::exception& e) {
             std::cerr << e.what() << std::endl;
             markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
@@ -460,6 +570,7 @@ int main(int argc, char** argv)
 
         try {
             OpenSim::STOFileAdapter::write(qTable, outputMotPath);
+            forceInDegreesNoInMot(outputMotPath);
             std::cout << "[Main] Saved " << outputMotPath
                       << " with " << allResults.size() << " frames.\n";
         } catch (const std::exception& e) {

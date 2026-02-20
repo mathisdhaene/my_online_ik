@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<IKTaskSet name="IK_task_01">
+	<objects>
+		<IKMarkerTask name="ACD">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="CLAD">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="CLAG">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="MAN">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="XYP">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="T8">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="MTACM">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="MTACB">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="MTACL">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="MTHA">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="MTHP">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="MTBA">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="MTBP">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="EL">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="EM">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="PSU">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="PSR">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="MC5">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="MC2">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+		<IKMarkerTask name="C7">
+			<apply>true</apply>
+			<weight>1</weight>
+		</IKMarkerTask>
+	</objects>
+	<groups />
+</IKTaskSet>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<OpenSimDocument Version="30000">
+   <InverseKinematicsTool name="Static_01_scaled">
+      <results_directory>C:\Users\slhad\Documents\OpenSim\Results\01_02_</results_directory>
+      <input_directory>C:\Users\slhad\Documents\OpenSim\Results\01_02_</input_directory>
+      <model_file>C:\Users\slhad\Documents\OpenSim\Models\Static_01_scaled.osim</model_file>
+      <constraint_weight>100</constraint_weight>
+      <accuracy>1e-05</accuracy>
+      <IKTaskSet file="IK_task_01.xml"/>
+      <marker_file>C:\Users\slhad\Documents\OpenSim\Motion data\01_02_\01_FL_m1.trc</marker_file>
+      <coordinate_file>Unassigned</coordinate_file>
+      <time_range>0 70</time_range>
+      <report_errors>true</report_errors>
+      <output_motion_file>C:\Users\slhad\Documents\OpenSim\Results\01_02_\01_FL_m1.mot</output_motion_file>
+      <report_marker_locations>true</report_marker_locations>
+   </InverseKinematicsTool>
+</OpenSimDocument>

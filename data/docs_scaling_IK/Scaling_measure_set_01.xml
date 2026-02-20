@@ -1,0 +1,349 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--Body segments are scaled by calculating the average distance between
+specified marker pairs.  The ratio between the averaged distance to the 
+distance in the generic model is then used to scale each specified segment 
+in the specified axis directions (e.g., X Y Z).-->
+<MeasurementSet name="Scaling_measure_set">
+	<objects>
+		<Measurement name="thoraxX">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> C7 T8</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> C7 MAN</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> XYP MAN</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> C7 ACD</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="torso">
+						<axes> X</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="thoraxY">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> C7 MAN</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> C7 T8</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> XYP MAN</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> C7 ACD</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="torso">
+						<axes> Y</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="thoraxZ">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> C7 MAN</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> C7 T8</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> XYP MAN</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> C7 ACD</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="torso">
+						<axes> Z</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="humerus_rX">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> ACD EM</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> ACD EL</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="humerus_r">
+						<axes> X</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="humerus_rY">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> ACD EM</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> ACD EL</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="humerus_r">
+						<axes> Y</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="humerus_rZ">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> ACD EM</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> ACD EL</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="humerus_r">
+						<axes> Z</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="ulna_rX">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> EM PSR</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> PSU EL</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="ulna_r">
+						<axes> X</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="ulna_rY">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> EM PSR</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> PSU EL</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="ulna_r">
+						<axes> Y</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="ulna_rZ">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> EM PSR</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> PSU EL</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="ulna_r">
+						<axes> Z</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="radius_rX">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> EM PSR</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> PSU EL</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="radius_r">
+						<axes> X</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="radius_rY">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> EM PSR</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> PSU EL</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="radius_r">
+						<axes> Y</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="radius_rZ">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> EM PSR</markers>
+					</MarkerPair>
+					<MarkerPair>
+						<markers> PSU EL</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="radius_r">
+						<axes> Z</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="hand_rX">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> MC5 MC2</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="hand_r">
+						<axes> X</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="hand_rY">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> MC5 MC2</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="hand_r">
+						<axes> Y</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+		<Measurement name="hand_rZ">
+			<apply>true</apply>
+			<MarkerPairSet>
+				<objects>
+					<MarkerPair>
+						<markers> MC5 MC2</markers>
+					</MarkerPair>
+				</objects>
+			<groups />
+			</MarkerPairSet>
+		<BodyScaleSet>
+				<objects>
+					<BodyScale name="hand_r">
+						<axes> Z</axes>
+					</BodyScale>
+				</objects>
+				<groups />
+			</BodyScaleSet>
+		</Measurement>
+	</objects>
+	<groups />
+</MeasurementSet>

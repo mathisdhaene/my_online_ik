@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<OpenSimDocument Version="30000">
+	<ScaleTool name="Static_01_scaled">
+		<mass>26.964</mass>
+		<height>171</height>
+		<age>25</age>
+		<notes>Unassigned</notes>
+		<GenericModelMaker>
+			<model_file>C:\Users\slhad\Documents\OpenSim\Models\upperlimb-biorob.osim</model_file>
+			<marker_set_file>Unassigned</marker_set_file>
+		</GenericModelMaker>
+		<ModelScaler>
+			<apply>true</apply>
+			<scaling_order> measurements</scaling_order>
+			<MeasurementSet file="Scaling_measure_set_01.xml"/>
+			<ScaleSet>
+				<objects />
+				<groups />
+			</ScaleSet>
+			<marker_file>C:\Users\slhad\Documents\OpenSim\Motion data\01_02_\01_Static.trc</marker_file>
+			<time_range> 0.5 4.5 </time_range>
+			<preserve_mass_distribution>true</preserve_mass_distribution>
+			<output_model_file>Model_01_scaled_step1.osim</output_model_file>
+			<output_scale_file>Model_01_scaled_step1_output.xml</output_scale_file>
+		</ModelScaler>
+		<MarkerPlacer>
+			<apply>true</apply>
+			<IKTaskSet file="Scaling_task_01.xml"/>
+			<marker_file>C:\Users\slhad\Documents\OpenSim\Motion data\01_02_\01_Static.trc</marker_file>
+			<coordinate_file>Unassigned</coordinate_file>
+			<time_range> 0.5 4.5 </time_range>
+			<output_motion_file>Model_01_scaled_motion.mot</output_motion_file>
+			<output_model_file>Model_01_scaled_final.osim</output_model_file>
+			<output_marker_file>Model_01_scaled_output.osim</output_marker_file>
+			<max_marker_movement> -1 </max_marker_movement>
+		</MarkerPlacer>
+		<report_errors>true</report_errors>
+	</ScaleTool>
+</OpenSimDocument>

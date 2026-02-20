@@ -36,16 +36,14 @@ sudo apt-get install --yes \
 OpenSim requires a **recent SWIG**, newer than what Ubuntu provides.
 
 ```bash
-mkdir -p ~/swig-source
-cd ~/swig-source
+mkdir -p ~/swig-release && cd ~/swig-release
 
-wget https://github.com/swig/swig/archive/refs/tags/v4.1.1.tar.gz
-tar xzf v4.1.1.tar.gz
+wget https://sourceforge.net/projects/swig/files/swig/swig-4.1.1/swig-4.1.1.tar.gz/download -O swig-4.1.1.tar.gz
+tar xzf swig-4.1.1.tar.gz
 cd swig-4.1.1
 
-sh autogen.sh
-./configure --prefix="$HOME/swig" --disable-ccache
-make -j$(nproc)
+./configure --prefix="$HOME/swig"
+make -j"$(nproc)"
 make install
 ```
 
@@ -209,6 +207,5 @@ Pull latest version and retry.
 * **my_online_ik**: Apache License 2.0
 * **RTOSIM**: Apache License 2.0
 * **OpenSim**: Apache License 2.0
-
 
 

@@ -263,6 +263,8 @@ int main(int argc, char** argv) {
     auto& state = model.initSystem();  // Initialize system & visualizer
     auto& viz = model.updVisualizer().updSimbodyVisualizer();
     viz.setBackgroundType(SimTK::Visualizer::GroundAndSky);
+    model.realizePosition(state);
+    viz.report(state); // Draw initial pose immediately.
 
     std::cout << "[Init] Model system and visualizer initialized." << std::endl;
 
