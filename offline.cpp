@@ -14,6 +14,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <cctype>
 
 #include "rtosim/queue/MarkerSetQueue.h"
 #include "rtosim/queue/GeneralisedCoordinatesQueue.h"
@@ -208,11 +211,80 @@ static void forceInDegreesNoInMot(const std::string& motPath) {
     }
 }
 
+static std::vector<std::string> splitWhitespaceTokens(const std::string& line) {
+    std::istringstream iss(line);
+    std::vector<std::string> tokens;
+    std::string token;
+    while (iss >> token) tokens.push_back(token);
+    return tokens;
+}
+
+static std::string toLowerCopy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+static double getTrcLengthScaleToMeters(const std::string& trcPath) {
+    std::ifstream in(trcPath);
+    if (!in.is_open()) {
+        std::cout << "[TRC] WARNING: could not open file to read units. Assuming meters.\n";
+        return 1.0;
+    }
+
+    // Typical TRC layout:
+    // line 3: column names (contains "Units")
+    // line 4: corresponding values (contains "mm" or "m")
+    std::string line1, line2, line3, line4;
+    if (!std::getline(in, line1) || !std::getline(in, line2) ||
+        !std::getline(in, line3) || !std::getline(in, line4)) {
+        std::cout << "[TRC] WARNING: header too short for units detection. Assuming meters.\n";
+        return 1.0;
+    }
+
+    const auto keys = splitWhitespaceTokens(line3);
+    const auto vals = splitWhitespaceTokens(line4);
+    if (keys.empty() || vals.empty()) {
+        std::cout << "[TRC] WARNING: unable to parse TRC header tokens for units. Assuming meters.\n";
+        return 1.0;
+    }
+
+    int unitsIdx = -1;
+    for (int i = 0; i < static_cast<int>(keys.size()); ++i) {
+        if (toLowerCopy(keys[i]) == "units") {
+            unitsIdx = i;
+            break;
+        }
+    }
+    if (unitsIdx < 0 || unitsIdx >= static_cast<int>(vals.size())) {
+        std::cout << "[TRC] WARNING: TRC header has no usable 'Units' field. Assuming meters.\n";
+        return 1.0;
+    }
+
+    const std::string units = toLowerCopy(vals[unitsIdx]);
+    if (units == "mm" || units == "millimeter" || units == "millimeters") {
+        std::cout << "[TRC] Units detected: " << vals[unitsIdx]
+                  << " -> converting marker positions from mm to m.\n";
+        return 0.001;
+    }
+
+    if (units == "m" || units == "meter" || units == "meters") {
+        std::cout << "[TRC] Units detected: " << vals[unitsIdx]
+                  << " -> marker positions already in meters.\n";
+        return 1.0;
+    }
+
+    std::cout << "[TRC] WARNING: unknown units '" << vals[unitsIdx]
+              << "'. Assuming meters.\n";
+    return 1.0;
+}
+
 void trcProducer(const std::string& trcPath,
                  rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue,
                  bool enableFilter)
 {
     std::cout << "[TRC] Reading: " << trcPath << std::endl;
+    const double lengthScaleToMeters = getTrcLengthScaleToMeters(trcPath);
 
     OpenSim::TimeSeriesTableVec3 table;
 
@@ -289,7 +361,7 @@ void trcProducer(const std::string& trcPath,
             auto it = colIndex.find(name);
             if (it != colIndex.end()) {
                 raw = row[it->second];
-                raw /= 1; // mm -> m
+                raw *= lengthScaleToMeters;
 
             }
 
