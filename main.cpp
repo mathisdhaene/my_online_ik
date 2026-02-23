@@ -6,6 +6,8 @@
 #include <cstring>
 #include <chrono>
 #include <cmath>    // for std::isfinite
+#include <unordered_map>
+#include <functional>
 
 #include "rtosim/queue/MarkerSetQueue.h"
 #include "rtosim/queue/GeneralisedCoordinatesQueue.h"
@@ -166,21 +168,56 @@ struct MarkerFilter {
 
 // ======================== SOCKET SETTINGS ========================
 const int PORT = 5555;
-const int NUM_MARKERS = 20;
+const int STREAM_NUM_MARKERS = 20;
 const int BYTES_PER_MARKER = 3 * sizeof(float);
-const int FRAME_SIZE = NUM_MARKERS * BYTES_PER_MARKER;
+const int FRAME_SIZE = STREAM_NUM_MARKERS * BYTES_PER_MARKER;
+
+static const std::vector<std::string> kIncomingMarkerOrder = {
+    "ACD", "CLAD", "CLAG", "MAN", "XYP", "T8", "MTACM", "MTACB", "MTACL", "MTHA",
+    "MTHP", "MTBA", "MTBP", "EL", "EM", "PSU", "PSR", "MC5", "MC2", "C7"
+};
 
 // ======================== SOCKET RECEIVER ========================
 
-void socketReceiver(rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue) {
+void socketReceiver(
+    rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue,
+    const std::vector<std::string>& modelMarkerNames) {
+
+    if (kIncomingMarkerOrder.size() != static_cast<size_t>(STREAM_NUM_MARKERS)) {
+        std::cerr << "[SocketReceiver] Internal error: stream marker order size mismatch." << std::endl;
+        markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
+        return;
+    }
+
+    std::unordered_map<std::string, int> incomingIdxByName;
+    incomingIdxByName.reserve(kIncomingMarkerOrder.size());
+    for (int i = 0; i < static_cast<int>(kIncomingMarkerOrder.size()); ++i) {
+        incomingIdxByName[kIncomingMarkerOrder[i]] = i;
+    }
+
+    std::vector<int> modelToIncomingIdx(modelMarkerNames.size(), -1);
+    int mappedCount = 0;
+    for (int i = 0; i < static_cast<int>(modelMarkerNames.size()); ++i) {
+        const auto it = incomingIdxByName.find(modelMarkerNames[i]);
+        if (it != incomingIdxByName.end()) {
+            modelToIncomingIdx[i] = it->second;
+            ++mappedCount;
+        } else {
+            std::cerr << "[SocketReceiver] WARNING: model marker '" << modelMarkerNames[i]
+                      << "' not found in incoming stream; filling with zeros." << std::endl;
+        }
+    }
+    std::cout << "[SocketReceiver] Marker mapping: " << mappedCount << "/"
+              << modelMarkerNames.size() << " model markers found in stream." << std::endl;
+
     int server_fd, new_socket;
     struct sockaddr_in address;
     int addrlen = sizeof(address);
-    float buffer[NUM_MARKERS * 3];
+    float buffer[STREAM_NUM_MARKERS * 3];
     int frameCount = 0;
 
     // Marker filter: outliers + light smoothing
-    MarkerFilter filter(NUM_MARKERS, 0.18, 6.0, 0.6);
+    MarkerFilter filter(static_cast<int>(modelMarkerNames.size()), 0.18, 6.0, 0.6);
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     address.sin_family = AF_INET;
@@ -192,9 +229,27 @@ void socketReceiver(rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue)
 
 
     while (true) {
-        int bytesRead = read(new_socket, buffer, FRAME_SIZE);
-        if (bytesRead <= 0)
+        int totalRead = 0;
+        while (totalRead < FRAME_SIZE) {
+            const int bytesRead = read(
+                new_socket,
+                reinterpret_cast<char*>(buffer) + totalRead,
+                FRAME_SIZE - totalRead
+            );
+            if (bytesRead <= 0) {
+                totalRead = bytesRead;
+                break;
+            }
+            totalRead += bytesRead;
+        }
+        if (totalRead <= 0) {
             break;
+        }
+        if (totalRead != FRAME_SIZE) {
+            std::cerr << "[SocketReceiver] Incomplete frame received (" << totalRead
+                      << " bytes), stopping stream." << std::endl;
+            break;
+        }
 
         rtosim::MarkerSetFrame frame;
 
@@ -203,10 +258,13 @@ void socketReceiver(rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue)
         double t = frame.time;
         frameCount++;
 
-        for (int i = 0; i < NUM_MARKERS; ++i) {
-            SimTK::Vec3 raw(buffer[i * 3 + 0],
-                            buffer[i * 3 + 1],
-                            buffer[i * 3 + 2]);
+        std::vector<SimTK::Vec3> incomingMarkers(STREAM_NUM_MARKERS, SimTK::Vec3(0));
+        for (int i = 0; i < STREAM_NUM_MARKERS; ++i) {
+            SimTK::Vec3 raw(
+                buffer[i * 3 + 0],
+                buffer[i * 3 + 1],
+                buffer[i * 3 + 2]
+            );
 
             // Protect against NaNs / Infs
             if (!std::isfinite(raw[0]) ||
@@ -214,7 +272,16 @@ void socketReceiver(rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue)
                 !std::isfinite(raw[2])) {
                 raw = SimTK::Vec3(0);
             }
+            incomingMarkers[i] = raw;
+        }
 
+        frame.data.reserve(modelMarkerNames.size());
+        for (int i = 0; i < static_cast<int>(modelMarkerNames.size()); ++i) {
+            SimTK::Vec3 raw(0);
+            const int incomingIdx = modelToIncomingIdx[i];
+            if (incomingIdx >= 0 && incomingIdx < STREAM_NUM_MARKERS) {
+                raw = incomingMarkers[incomingIdx];
+            }
             SimTK::Vec3 clean = filter.filterOne(i, raw, t);
             rtosim::MarkerData marker = clean;
             frame.data.push_back(marker);
@@ -267,6 +334,15 @@ int main(int argc, char** argv) {
     viz.report(state); // Draw initial pose immediately.
 
     std::cout << "[Init] Model system and visualizer initialized." << std::endl;
+
+    OpenSim::Array<std::string> modelMarkerNamesArray;
+    const_cast<OpenSim::MarkerSet&>(model.getMarkerSet()).getMarkerNames(modelMarkerNamesArray);
+    std::vector<std::string> modelMarkerNames;
+    modelMarkerNames.reserve(modelMarkerNamesArray.getSize());
+    for (int i = 0; i < modelMarkerNamesArray.getSize(); ++i) {
+        modelMarkerNames.push_back(modelMarkerNamesArray[i]);
+    }
+    std::cout << "[Init] Model markers: " << modelMarkerNames.size() << std::endl;
 
 
     rtosim::IKSolverParallel ikSolver(
@@ -332,7 +408,7 @@ int main(int argc, char** argv) {
 
 
 
-    std::thread socketThread(socketReceiver, std::ref(markerQueue));
+    std::thread socketThread(socketReceiver, std::ref(markerQueue), std::cref(modelMarkerNames));
 
     int frameCount = 0;
     std::vector<OneEuroFilter> jointFilters;
