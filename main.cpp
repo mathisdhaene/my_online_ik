@@ -86,6 +86,12 @@ private:
     }
 };
 
+namespace {
+constexpr double kJointFilterMinCutoff = 30.0;
+constexpr double kJointFilterBeta = 0.1;
+constexpr double kJointFilterDCutoff = 5.0;
+}
+
 // ==========================================================
 //          MARKER FILTER: OUTLIERS + LIGHT SMOOTHING
 // ==========================================================
@@ -158,7 +164,56 @@ struct MarkerFilter {
 
         return s.xHat;
     }
+
+    SimTK::Vec3 filterOne(int idx, const SimTK::Vec3& raw, double t, bool isValid) {
+        auto& s = states[idx];
+
+        if (!isValid) {
+            if (s.initialized) {
+                s.lastTime = t;
+                return s.xHat;
+            }
+            return SimTK::Vec3(0.0);
+        }
+
+        if (!s.initialized) {
+            s.initialized = true;
+            s.lastRaw = raw;
+            s.xHat = raw;
+            s.lastTime = t;
+            return raw;
+        }
+
+        double dt = t - s.lastTime;
+        if (dt <= 0.0)
+            dt = 1.0 / 30.0;
+
+        const double jump = (raw - s.lastRaw).norm();
+        const double velocity = jump / dt;
+        const bool outlier = (jump > maxJump) || (velocity > maxVelocity);
+
+        if (outlier) {
+            std::cout << "[OUTLIER] Marker " << idx
+                      << " at time " << t
+                      << " (jump=" << jump
+                      << ", vel=" << velocity << ")" << std::endl;
+            // Hold the filtered estimate for this frame, but advance the raw
+            // reference so the filter can reacquire after a fast real motion.
+            s.lastRaw = raw;
+            s.lastTime = t;
+            return s.xHat;
+        }
+
+        s.xHat = alpha * raw + (1.0 - alpha) * s.xHat;
+        s.lastRaw = raw;
+        s.lastTime = t;
+        return s.xHat;
+    }
 };
+
+static bool isFiniteVec3(const SimTK::Vec3& v) {
+    return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
 
 
 		
@@ -204,7 +259,7 @@ void socketReceiver(
             ++mappedCount;
         } else {
             std::cerr << "[SocketReceiver] WARNING: model marker '" << modelMarkerNames[i]
-                      << "' not found in incoming stream; filling with zeros." << std::endl;
+                      << "' not found in incoming stream; holding last estimate." << std::endl;
         }
     }
     std::cout << "[SocketReceiver] Marker mapping: " << mappedCount << "/"
@@ -259,6 +314,7 @@ void socketReceiver(
         frameCount++;
 
         std::vector<SimTK::Vec3> incomingMarkers(STREAM_NUM_MARKERS, SimTK::Vec3(0));
+        std::vector<bool> incomingValid(STREAM_NUM_MARKERS, false);
         for (int i = 0; i < STREAM_NUM_MARKERS; ++i) {
             SimTK::Vec3 raw(
                 buffer[i * 3 + 0],
@@ -266,23 +322,20 @@ void socketReceiver(
                 buffer[i * 3 + 2]
             );
 
-            // Protect against NaNs / Infs
-            if (!std::isfinite(raw[0]) ||
-                !std::isfinite(raw[1]) ||
-                !std::isfinite(raw[2])) {
-                raw = SimTK::Vec3(0);
-            }
+            incomingValid[i] = isFiniteVec3(raw);
             incomingMarkers[i] = raw;
         }
 
         frame.data.reserve(modelMarkerNames.size());
         for (int i = 0; i < static_cast<int>(modelMarkerNames.size()); ++i) {
             SimTK::Vec3 raw(0);
+            bool isValid = false;
             const int incomingIdx = modelToIncomingIdx[i];
             if (incomingIdx >= 0 && incomingIdx < STREAM_NUM_MARKERS) {
                 raw = incomingMarkers[incomingIdx];
+                isValid = incomingValid[incomingIdx];
             }
-            SimTK::Vec3 clean = filter.filterOne(i, raw, t);
+            SimTK::Vec3 clean = filter.filterOne(i, raw, t, isValid);
             rtosim::MarkerData marker = clean;
             frame.data.push_back(marker);
         }
@@ -431,9 +484,9 @@ int main(int argc, char** argv) {
             jointFilters.resize(
                 qVals.size(),
                 OneEuroFilter(
-                    /* minCutoff */ 4.0,   // more responsive
-                    /* beta      */ 0.02,  // lighter smoothing
-                    /* dCutoff   */ 1.0
+                    /* minCutoff */ kJointFilterMinCutoff,
+                    /* beta      */ kJointFilterBeta,
+                    /* dCutoff   */ kJointFilterDCutoff
                 )
             );
             jointFiltersInitialized = true;
@@ -441,8 +494,7 @@ int main(int argc, char** argv) {
 
         // One-Euro filtering of each joint angle
         for (int i = 0; i < (int)qVals.size(); ++i) {
-            // qVals[i] = jointFilters[i].filter(qVals[i], result.time);
-            qVals[i] = qVals[i];
+            qVals[i] = jointFilters[i].filter(qVals[i], result.time);
         }
 
         auto& coordSet = model.updCoordinateSet();
@@ -476,6 +528,22 @@ int main(int argc, char** argv) {
         std::cout << "[Main] Processing remaining frame at time: "
                   << remainingResult.time << std::endl;
         auto qVals = remainingResult.data.getQ();
+
+        if (!jointFiltersInitialized) {
+            jointFilters.resize(
+                qVals.size(),
+                OneEuroFilter(
+                    /* minCutoff */ kJointFilterMinCutoff,
+                    /* beta      */ kJointFilterBeta,
+                    /* dCutoff   */ kJointFilterDCutoff
+                )
+            );
+            jointFiltersInitialized = true;
+        }
+
+        for (int i = 0; i < (int)qVals.size(); ++i) {
+            qVals[i] = jointFilters[i].filter(qVals[i], remainingResult.time);
+        }
 
         auto& coordSet = model.updCoordinateSet();
         for (int i = 0; i < coordSet.getSize(); ++i) {

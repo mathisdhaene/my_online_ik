@@ -30,6 +30,7 @@
 #include <OpenSim/Common/Set.h>
 #include <OpenSim/Common/DataAdapter.h>
 #include <OpenSim/Tools/IKCoordinateTask.h>
+#include <OpenSim/Tools/IKMarkerTask.h>
 #include <OpenSim/Tools/InverseKinematicsTool.h>
 
 
@@ -95,6 +96,12 @@ private:
     }
 };
 
+namespace {
+constexpr double kJointFilterMinCutoff = 30.0;
+constexpr double kJointFilterBeta = 0.1;
+constexpr double kJointFilterDCutoff = 5.0;
+}
+
 // ==========================================================
 //          MARKER FILTER: OUTLIERS + LIGHT SMOOTHING
 // ==========================================================
@@ -159,7 +166,55 @@ struct MarkerFilter {
 
         return s.xHat;
     }
+
+    SimTK::Vec3 filterOne(int idx, const SimTK::Vec3& raw, double t, bool isValid) {
+        auto& s = states[idx];
+
+        if (!isValid) {
+            if (s.initialized) {
+                s.lastTime = t;
+                return s.xHat;
+            }
+            return SimTK::Vec3(0.0);
+        }
+
+        if (!s.initialized) {
+            s.initialized = true;
+            s.lastRaw = raw;
+            s.xHat = raw;
+            s.lastTime = t;
+            return raw;
+        }
+
+        double dt = t - s.lastTime;
+        if (dt <= 0.0) dt = 1.0 / 30.0;
+
+        const double jump = (raw - s.lastRaw).norm();
+        const double velocity = jump / dt;
+        const bool outlier = (jump > maxJump) || (velocity > maxVelocity);
+
+        if (outlier) {
+            std::cout << "[OUTLIER] Marker " << idx
+                      << " at time " << t
+                      << " (jump=" << jump
+                      << ", vel=" << velocity << ")\n";
+            // Hold the filtered estimate for this frame, but advance the raw
+            // reference so the filter can reacquire after a fast real motion.
+            s.lastRaw = raw;
+            s.lastTime = t;
+            return s.xHat;
+        }
+
+        s.xHat = alpha * raw + (1.0 - alpha) * s.xHat;
+        s.lastRaw = raw;
+        s.lastTime = t;
+        return s.xHat;
+    }
 };
+
+static bool isFiniteVec3(const SimTK::Vec3& v) {
+    return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
 
 // ==========================================================
 //                 OFFLINE PRODUCER (TRC)
@@ -232,56 +287,91 @@ static double getTrcLengthScaleToMeters(const std::string& trcPath) {
         return 1.0;
     }
 
-    // Typical TRC layout:
-    // line 3: column names (contains "Units")
-    // line 4: corresponding values (contains "mm" or "m")
-    std::string line1, line2, line3, line4;
-    if (!std::getline(in, line1) || !std::getline(in, line2) ||
-        !std::getline(in, line3) || !std::getline(in, line4)) {
+    // TRC files are not always identical: detect the header row containing
+    // "Units" and read the following row as values.
+    std::vector<std::string> lines;
+    lines.reserve(16);
+    std::string line;
+    for (int i = 0; i < 16 && std::getline(in, line); ++i) {
+        lines.push_back(line);
+    }
+    if (lines.size() < 2) {
         std::cout << "[TRC] WARNING: header too short for units detection. Assuming meters.\n";
         return 1.0;
     }
 
-    const auto keys = splitWhitespaceTokens(line3);
-    const auto vals = splitWhitespaceTokens(line4);
-    if (keys.empty() || vals.empty()) {
-        std::cout << "[TRC] WARNING: unable to parse TRC header tokens for units. Assuming meters.\n";
-        return 1.0;
+    int headerRowIdx = -1;
+    int unitsIdx = -1;
+    for (int r = 0; r < static_cast<int>(lines.size()) - 1; ++r) {
+        const auto keys = splitWhitespaceTokens(lines[r]);
+        if (keys.empty()) continue;
+        for (int c = 0; c < static_cast<int>(keys.size()); ++c) {
+            if (toLowerCopy(keys[c]) == "units") {
+                headerRowIdx = r;
+                unitsIdx = c;
+                break;
+            }
+        }
+        if (headerRowIdx >= 0) break;
     }
 
-    int unitsIdx = -1;
-    for (int i = 0; i < static_cast<int>(keys.size()); ++i) {
-        if (toLowerCopy(keys[i]) == "units") {
-            unitsIdx = i;
-            break;
-        }
-    }
-    if (unitsIdx < 0 || unitsIdx >= static_cast<int>(vals.size())) {
+    if (headerRowIdx < 0 || unitsIdx < 0 || headerRowIdx + 1 >= static_cast<int>(lines.size())) {
         std::cout << "[TRC] WARNING: TRC header has no usable 'Units' field. Assuming meters.\n";
         return 1.0;
     }
 
-    const std::string units = toLowerCopy(vals[unitsIdx]);
+    const auto vals = splitWhitespaceTokens(lines[headerRowIdx + 1]);
+    if (unitsIdx >= static_cast<int>(vals.size())) {
+        std::cout << "[TRC] WARNING: 'Units' column found but value row is malformed. Assuming meters.\n";
+        return 1.0;
+    }
+
+    const std::string unitsRaw = vals[unitsIdx];
+    const std::string units = toLowerCopy(unitsRaw);
     if (units == "mm" || units == "millimeter" || units == "millimeters") {
-        std::cout << "[TRC] Units detected: " << vals[unitsIdx]
+        std::cout << "[TRC] Units detected: " << unitsRaw
                   << " -> converting marker positions from mm to m.\n";
         return 0.001;
     }
 
     if (units == "m" || units == "meter" || units == "meters") {
-        std::cout << "[TRC] Units detected: " << vals[unitsIdx]
+        std::cout << "[TRC] Units detected: " << unitsRaw
                   << " -> marker positions already in meters.\n";
         return 1.0;
     }
 
-    std::cout << "[TRC] WARNING: unknown units '" << vals[unitsIdx]
+    std::cout << "[TRC] WARNING: unknown units '" << unitsRaw
               << "'. Assuming meters.\n";
     return 1.0;
 }
 
+static std::unordered_set<std::string> getTrcMarkerLabels(const std::string& trcPath) {
+    OpenSim::TRCFileAdapter adapter;
+    OpenSim::DataAdapter::OutputTables tables = adapter.read(trcPath);
+
+    auto it = tables.find("markers");
+    if (it == tables.end() || !it->second) {
+        throw std::runtime_error("[TRC] No valid 'markers' table found while reading labels.");
+    }
+
+    const auto* vec3Tbl = dynamic_cast<const OpenSim::TimeSeriesTableVec3*>(it->second.get());
+    if (!vec3Tbl) {
+        throw std::runtime_error("[TRC] 'markers' table is not a TimeSeriesTableVec3.");
+    }
+
+    std::unordered_set<std::string> labels;
+    const auto& colLabels = vec3Tbl->getColumnLabels();
+    labels.reserve(colLabels.size());
+    for (const auto& s : colLabels) {
+        labels.insert(s);
+    }
+    return labels;
+}
+
 void trcProducer(const std::string& trcPath,
                  rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame>& markerQueue,
-                 bool enableFilter)
+                 bool enableFilter,
+                 double startTimeSeconds)
 {
     std::cout << "[TRC] Reading: " << trcPath << std::endl;
     const double lengthScaleToMeters = getTrcLengthScaleToMeters(trcPath);
@@ -328,11 +418,11 @@ void trcProducer(const std::string& trcPath,
         colIndex[labels[i]] = i;
     }
 
-    // Warn for missing markers (we’ll fill them with zeros)
+    // Warn for missing markers; the causal filter will hold the last estimate.
     for (const auto& name : kMarkerOrder) {
         if (colIndex.find(name) == colIndex.end()) {
             std::cout << "[TRC] WARNING: marker column missing: '" << name
-                      << "' (will fill with zeros)\n";
+                      << "' (will hold last estimate)\n";
         }
     }
 
@@ -341,12 +431,22 @@ void trcProducer(const std::string& trcPath,
     const int nMarkers = (int)kMarkerOrder.size();
 
     std::cout << "[TRC] Rows: " << nRows << " | Markers expected: " << nMarkers << "\n";
+    if (startTimeSeconds > 0.0) {
+        std::cout << "[TRC] Start-time filter enabled: keeping frames with t >= "
+                  << startTimeSeconds << " s\n";
+    }
 
     // Same filter parameters as your current online receiver
     MarkerFilter filter(nMarkers, /*maxJump*/0.18, /*maxVel*/6.0, /*alpha*/0.6);
+    int keptRows = 0;
+    bool warnedStartAfterEnd = false;
 
     for (int r = 0; r < nRows; ++r) {
         const double t = times[r];
+        if (t < startTimeSeconds) {
+            continue;
+        }
+        ++keptRows;
 
         rtosim::MarkerSetFrame frame;
         frame.time = t;
@@ -358,19 +458,20 @@ void trcProducer(const std::string& trcPath,
             const auto& name = kMarkerOrder[m];
 
             SimTK::Vec3 raw(0.0);
+            bool isValid = false;
             auto it = colIndex.find(name);
             if (it != colIndex.end()) {
                 raw = row[it->second];
                 raw *= lengthScaleToMeters;
-
+                isValid = isFiniteVec3(raw);
             }
 
-            // Protect against NaNs / Infs
-            if (!std::isfinite(raw[0]) || !std::isfinite(raw[1]) || !std::isfinite(raw[2])) {
-                raw = SimTK::Vec3(0);
+            SimTK::Vec3 clean;
+            if (enableFilter) {
+                clean = filter.filterOne(m, raw, t, isValid);
+            } else {
+                clean = isValid ? raw : SimTK::Vec3(0.0);
             }
-
-            SimTK::Vec3 clean = enableFilter ? filter.filterOne(m, raw, t) : raw;
             rtosim::MarkerData marker = clean;
             frame.data.push_back(marker);
         }
@@ -384,6 +485,13 @@ void trcProducer(const std::string& trcPath,
     }
 
     markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
+    if (keptRows == 0) {
+        warnedStartAfterEnd = true;
+        std::cout << "[TRC] WARNING: no rows kept after start-time filter.\n";
+    }
+    if (!warnedStartAfterEnd) {
+        std::cout << "[TRC] Kept rows after start-time filter: " << keptRows << "\n";
+    }
     std::cout << "[TRC] EndOfData pushed.\n";
 }
 
@@ -396,8 +504,8 @@ int main(int argc, char** argv)
 {
     if (argc < 3) {
         std::cerr << "Usage:\n"
-                  << "  ./offline_ik_noviz <model.osim> <markers.trc> [output_directory] [ik_tasks.xml] [--iktool] [--parity]\n"
-                  << "  ./offline_ik_noviz <model.osim> <markers.trc> <ik_tasks.xml> [--iktool] [--parity]\n";
+                  << "  ./offline_ik_noviz <model.osim> <markers.trc> [output_directory] [ik_tasks.xml] [--iktool] [--parity] [--start-time <seconds>] [--output-name <file.mot>] [--output-file <path/file.mot>]\n"
+                  << "  ./offline_ik_noviz <model.osim> <markers.trc> <ik_tasks.xml> [--iktool] [--parity] [--start-time <seconds>] [--output-name <file.mot>] [--output-file <path/file.mot>]\n";
         return 1;
     }
 
@@ -405,25 +513,101 @@ int main(int argc, char** argv)
     const std::string trcPath   = argv[2];
     std::string outputDir       = ".";
     std::string ikTasksPath;
+    std::string outputName      = "output_results.mot";
+    std::string outputFilePath;
     bool useIkTool = false;
     bool parityMode = false;
+    double startTimeSeconds = 0.0;
     for (int i = 3; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--iktool") {
             useIkTool = true;
         } else if (arg == "--parity") {
             parityMode = true;
+        } else if (arg == "--start-time") {
+            if (i + 1 >= argc) {
+                std::cerr << "[ERROR] --start-time requires a value in seconds.\n";
+                return 1;
+            }
+            try {
+                startTimeSeconds = std::stod(argv[++i]);
+            } catch (...) {
+                std::cerr << "[ERROR] Invalid --start-time value: " << argv[i] << "\n";
+                return 1;
+            }
+        } else if (arg == "--output-name") {
+            if (i + 1 >= argc) {
+                std::cerr << "[ERROR] --output-name requires a filename (e.g. my_trial.mot).\n";
+                return 1;
+            }
+            outputName = argv[++i];
+            if (outputName.empty()) {
+                std::cerr << "[ERROR] --output-name cannot be empty.\n";
+                return 1;
+            }
+            if (outputName.find('/') != std::string::npos) {
+                std::cerr << "[ERROR] --output-name must be a filename only (no '/'). Use --output-file for full paths.\n";
+                return 1;
+            }
+        } else if (arg.rfind("--output-name=", 0) == 0) {
+            outputName = arg.substr(std::string("--output-name=").size());
+            if (outputName.empty()) {
+                std::cerr << "[ERROR] --output-name cannot be empty.\n";
+                return 1;
+            }
+            if (outputName.find('/') != std::string::npos) {
+                std::cerr << "[ERROR] --output-name must be a filename only (no '/'). Use --output-file for full paths.\n";
+                return 1;
+            }
+        } else if (arg == "--output-file") {
+            if (i + 1 >= argc) {
+                std::cerr << "[ERROR] --output-file requires a full output path.\n";
+                return 1;
+            }
+            outputFilePath = argv[++i];
+            if (outputFilePath.empty()) {
+                std::cerr << "[ERROR] --output-file cannot be empty.\n";
+                return 1;
+            }
+        } else if (arg.rfind("--output-file=", 0) == 0) {
+            outputFilePath = arg.substr(std::string("--output-file=").size());
+            if (outputFilePath.empty()) {
+                std::cerr << "[ERROR] --output-file cannot be empty.\n";
+                return 1;
+            }
+        } else if (arg.rfind("--start-time=", 0) == 0) {
+            const std::string val = arg.substr(std::string("--start-time=").size());
+            try {
+                startTimeSeconds = std::stod(val);
+            } catch (...) {
+                std::cerr << "[ERROR] Invalid --start-time value: " << val << "\n";
+                return 1;
+            }
         } else if (arg.size() >= 4 && arg.substr(arg.size() - 4) == ".xml") {
             ikTasksPath = arg;
         } else {
             outputDir = arg;
         }
     }
+    if (startTimeSeconds < 0.0) {
+        std::cerr << "[ERROR] --start-time must be >= 0.\n";
+        return 1;
+    }
 
     if (!outputDir.empty() && outputDir.back() == '/')
         outputDir.pop_back();
 
-    const std::string outputMotPath = outputDir + "/output_results.mot";
+    std::string outputMotPath;
+    if (!outputFilePath.empty()) {
+        outputMotPath = outputFilePath;
+        const auto slashPos = outputMotPath.find_last_of('/');
+        if (slashPos != std::string::npos) {
+            outputDir = outputMotPath.substr(0, slashPos);
+            if (outputDir.empty()) outputDir = "/";
+        }
+    } else {
+        outputMotPath = outputDir + "/" + outputName;
+    }
 
     // Queues & latches (same pattern as your online code)
     rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame> markerQueue;
@@ -500,6 +684,10 @@ int main(int argc, char** argv)
               << kMarkerOrder.size() << " markers).\n";
 
     if (useIkTool) {
+        if (startTimeSeconds > 0.0) {
+            std::cerr << "[ERROR] --start-time is currently supported only in solver mode (without --iktool).\n";
+            return 1;
+        }
         std::cout << "[DEBUG] Running OpenSim InverseKinematicsTool path.\n";
         OpenSim::InverseKinematicsTool ikTool;
         ikTool.setModel(model);
@@ -540,7 +728,7 @@ int main(int argc, char** argv)
     );
     ikSolver.setParityMode(parityMode);
     if (parityMode) {
-        std::cout << "[DEBUG] Parity mode enabled: persistent IK tracking, no marker filter.\n";
+        std::cout << "[DEBUG] Parity mode enabled: persistent IK tracking.\n";
     }
 
     // ======================
@@ -550,13 +738,41 @@ int main(int argc, char** argv)
         ikSolver.setInverseKinematicsTaskSet(ikTasksPath);
         std::cout << "[DEBUG] Loaded IK tasks from: " << ikTasksPath << "\n";
     } else {
-        std::cout << "[DEBUG] No IK task file: using solver defaults (all marker weights = 1).\n";
+        // Build an automatic task set from TRC marker availability:
+        // present markers -> weight 1; missing markers -> disabled.
+        try {
+            const auto trcLabels = getTrcMarkerLabels(trcPath);
+            OpenSim::IKTaskSet autoTasks;
+            int presentCount = 0;
+            int missingCount = 0;
+            for (const auto& markerName : modelMarkerNames) {
+                auto* t = new OpenSim::IKMarkerTask();
+                t->setName(markerName);
+                const bool present = (trcLabels.find(markerName) != trcLabels.end());
+                t->setApply(present);
+                t->setWeight(present ? 1.0 : 0.0);
+                autoTasks.adoptAndAppend(t);
+                if (present) ++presentCount;
+                else ++missingCount;
+            }
+
+            const std::string autoIkTasksPath = outputDir + "/auto_ik_tasks.xml";
+            autoTasks.print(autoIkTasksPath);
+            ikSolver.setInverseKinematicsTaskSet(autoIkTasksPath);
+            std::cout << "[DEBUG] Auto IK tasks written to: " << autoIkTasksPath << "\n";
+            std::cout << "[DEBUG] Marker tasks: present=" << presentCount
+                      << ", missing/disabled=" << missingCount << "\n";
+        } catch (const std::exception& e) {
+            std::cout << "[WARN] Failed to auto-build IK tasks from TRC labels: "
+                      << e.what() << "\n";
+            std::cout << "[DEBUG] Falling back to solver defaults (all marker weights = 1).\n";
+        }
     }
 
     // Producer thread (TRC) + IK thread
     std::thread producerThread([&](){
         try {
-            trcProducer(trcPath, markerQueue, !parityMode);
+            trcProducer(trcPath, markerQueue, true, startTimeSeconds);
         } catch (const std::exception& e) {
             std::cerr << e.what() << std::endl;
             markerQueue.push(rtosim::EndOfData::get<rtosim::MarkerSetFrame>());
@@ -587,14 +803,17 @@ int main(int argc, char** argv)
         if (!jointFiltersInitialized) {
             jointFilters.resize(
                 qVals.size(),
-                OneEuroFilter(/*minCutoff*/4.0, /*beta*/0.02, /*dCutoff*/1.0)
+                OneEuroFilter(
+                    /*minCutoff*/kJointFilterMinCutoff,
+                    /*beta*/kJointFilterBeta,
+                    /*dCutoff*/kJointFilterDCutoff
+                )
             );
             jointFiltersInitialized = true;
         }
 
         for (int i = 0; i < (int)qVals.size(); ++i) {
-            // qVals[i] = jointFilters[i].filter(qVals[i], result.time);
-            qVals[i] = qVals[i];
+            qVals[i] = jointFilters[i].filter(qVals[i], result.time);
         }
 
         auto end = std::chrono::high_resolution_clock::now();
