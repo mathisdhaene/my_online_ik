@@ -1,11 +1,14 @@
 #include <iostream>
 #include <vector>
 #include <thread>
+#include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <cstring>
 #include <chrono>
 #include <cmath>    // for std::isfinite
+#include <atomic>
 #include <unordered_map>
 #include <functional>
 
@@ -223,6 +226,7 @@ static bool isFiniteVec3(const SimTK::Vec3& v) {
 
 // ======================== SOCKET SETTINGS ========================
 const int PORT = 5555;
+const int OUTPUT_PORT = 5557;  // Port for sending joint angles
 const int STREAM_NUM_MARKERS = 20;
 const int BYTES_PER_MARKER = 3 * sizeof(float);
 const int FRAME_SIZE = STREAM_NUM_MARKERS * BYTES_PER_MARKER;
@@ -231,6 +235,19 @@ static const std::vector<std::string> kIncomingMarkerOrder = {
     "ACD", "CLAD", "CLAG", "MAN", "XYP", "T8", "MTACM", "MTACB", "MTACL", "MTHA",
     "MTHP", "MTBA", "MTBP", "EL", "EM", "PSU", "PSR", "MC5", "MC2", "C7"
 };
+
+static bool sendAll(int fd, const void* data, size_t numBytes) {
+    const char* bytes = static_cast<const char*>(data);
+    size_t totalSent = 0;
+    while (totalSent < numBytes) {
+        const ssize_t sentNow = send(fd, bytes + totalSent, numBytes - totalSent, 0);
+        if (sentNow <= 0) {
+            return false;
+        }
+        totalSent += static_cast<size_t>(sentNow);
+    }
+    return true;
+}
 
 // ======================== SOCKET RECEIVER ========================
 
@@ -350,6 +367,106 @@ void socketReceiver(
     close(server_fd);
 }
 
+// ======================== SOCKET SENDER ========================
+
+void socketSender(
+    rtb::Concurrency::Queue<std::vector<double>>& jointQueue,
+    std::atomic<bool>& streamComplete) {
+
+    int server_fd, new_socket;
+    struct sockaddr_in address;
+    int opt = 1;
+    int addrlen = sizeof(address);
+
+    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        std::cerr << "[SocketSender] Socket creation failed." << std::endl;
+        return;
+    }
+
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
+        std::cerr << "[SocketSender] Setsockopt failed." << std::endl;
+        close(server_fd);
+        return;
+    }
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(OUTPUT_PORT);
+
+    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        std::cerr << "[SocketSender] Bind failed." << std::endl;
+        close(server_fd);
+        return;
+    }
+
+    if (listen(server_fd, 3) < 0) {
+        std::cerr << "[SocketSender] Listen failed." << std::endl;
+        close(server_fd);
+        return;
+    }
+
+    std::cout << "[SocketSender] Listening on port " << OUTPUT_PORT << " for joint angle clients." << std::endl;
+
+    fd_set readfds;
+    timeval timeout;
+    while (true) {
+        FD_ZERO(&readfds);
+        FD_SET(server_fd, &readfds);
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+
+        const int ready = select(server_fd + 1, &readfds, nullptr, nullptr, &timeout);
+        if (ready < 0) {
+            std::cerr << "[SocketSender] Select failed while waiting for client." << std::endl;
+            close(server_fd);
+            return;
+        }
+        if (ready == 0) {
+            if (streamComplete.load()) {
+                std::cout << "[SocketSender] No joint-angle client connected before stream end." << std::endl;
+                close(server_fd);
+                return;
+            }
+            continue;
+        }
+
+        if ((new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen)) < 0) {
+            std::cerr << "[SocketSender] Accept failed." << std::endl;
+            close(server_fd);
+            return;
+        }
+        break;
+    }
+
+    std::cout << "[SocketSender] Client connected for joint angles." << std::endl;
+    jointQueue.subscribe();
+
+    while (true) {
+        auto qVals = jointQueue.pop();
+        if (qVals.empty())  // Assuming empty vector as end
+            break;
+
+        // Send the number of joints first
+        int numJoints = qVals.size();
+        if (!sendAll(new_socket, &numJoints, sizeof(numJoints))) {
+            std::cerr << "[SocketSender] Failed to send num joints." << std::endl;
+            break;
+        }
+
+        // Send the joint angles
+        if (!sendAll(new_socket, qVals.data(), qVals.size() * sizeof(double))) {
+            std::cerr << "[SocketSender] Failed to send joint angles." << std::endl;
+            break;
+        }
+
+        std::cout << "[SocketSender] Sent " << numJoints << " joint angles." << std::endl;
+    }
+
+    close(new_socket);
+    close(server_fd);
+    jointQueue.unsubscribe();
+}
+
 // ======================== MAIN ========================
 
 int main(int argc, char** argv) {
@@ -374,6 +491,8 @@ int main(int argc, char** argv) {
 
     rtosim::ThreadPoolJobs<rtosim::MarkerSetFrame> markerQueue;
     rtosim::IKoutputs<rtosim::GeneralisedCoordinatesFrame> outputQueue;
+    rtb::Concurrency::Queue<std::vector<double>> jointQueue;
+    std::atomic<bool> jointStreamComplete(false);
     rtb::Concurrency::Latch doneWithSubscriptions(1);
     rtb::Concurrency::Latch doneWithExecution(1);
 
@@ -462,6 +581,7 @@ int main(int argc, char** argv) {
 
 
     std::thread socketThread(socketReceiver, std::ref(markerQueue), std::cref(modelMarkerNames));
+    std::thread senderThread(socketSender, std::ref(jointQueue), std::ref(jointStreamComplete));
 
     int frameCount = 0;
     std::vector<OneEuroFilter> jointFilters;
@@ -513,6 +633,7 @@ int main(int argc, char** argv) {
         std::cout << "[IK Timing] Frame " << frameCount << " took "
                   << duration_ms << " ms (" << duration_us << " μs)." << std::endl;
 
+        jointQueue.push(qVals);
         allResults.emplace_back(result.time, qVals);
         frameCount++;
     }
@@ -565,12 +686,17 @@ int main(int argc, char** argv) {
             std::cout << q << " ";
         std::cout << std::endl;
 
+        jointQueue.push(qVals);
         allResults.emplace_back(remainingResult.time, qVals);
         frameCount++;
     }
 
+    jointStreamComplete.store(true);
+    jointQueue.push(std::vector<double>{});
+
     socketThread.join();
     ikThread.join();
+    senderThread.join();
 
     // ================= WRITE .MOT =================
     if (!allResults.empty()) {
